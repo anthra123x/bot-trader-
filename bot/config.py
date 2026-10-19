@@ -14,8 +14,8 @@ load_dotenv()
 
 class BotRiskConfig(BaseModel):
     """Hard-coded defensive risk limits with asymmetric profit expectation."""
-    max_risk_per_trade_pct: float = Field(default=1.0, description="Max portfolio loss risk per trade (e.g. 1.0%)")
-    max_position_size_pct: float = Field(default=6.0, description="Max capital allocation to single position (6.0%)")
+    max_risk_per_trade_pct: float = Field(default=1.5, description="Max portfolio loss risk per trade (1.5%)")
+    max_position_size_pct: float = Field(default=12.0, description="Max capital allocation to single position (12.0%)")
     max_daily_drawdown_pct: float = Field(default=3.0, description="Kill switch threshold for daily loss (3%)")
     default_stop_loss_pct: float = Field(default=2.5, description="Fallback stop loss if LLM provides none (2.5%)")
     max_stop_loss_pct: float = Field(default=4.0, description="Maximum allowable stop loss distance (4.0%)")
@@ -39,7 +39,8 @@ class BotRiskConfig(BaseModel):
     # High-Conviction Institutional Quality Gate
     min_signal_confidence: float = Field(default=0.0, description="Minimum multi-agent conviction required for entry (0.0=disabled by default, 0.68 in runner)")
     # Correlated Exposure Limit (Systemic Risk Control)
-    max_concurrent_crypto_positions: int = Field(default=4, description="Max simultaneous crypto positions to prevent systemic portfolio risk")
+    max_concurrent_crypto_positions: int = Field(default=5, description="Max simultaneous crypto positions to prevent systemic portfolio risk")
+
     # Dynamic Portfolio Balancing & Concentration Trim (Capital Rotation)
     enable_dynamic_rebalancing: bool = Field(default=True, description="Enable capital rebalancing when single asset exceeds concentration cap")
     max_concentration_threshold_pct: float = Field(default=20.0, description="Concentration cap where position trim/harvest is recommended")

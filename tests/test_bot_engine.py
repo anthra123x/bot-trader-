@@ -560,4 +560,59 @@ class TestLeanAndFreqtradeProtections:
         res_good = engine.evaluate(good_signal, bal, positions=[])
         assert res_good.is_approved is True
 
+    def test_persistent_position_targets_and_cap_protection(self):
+        """Verifies:
+        1. Automatic registration and retrieval of persistent target TP & SL.
+        2. Monotonic ratcheting of stop loss via update_position_stop.
+        3. Graceful rejection when attempting to micro-add to an already full position.
+        """
+        config = BotRiskConfig(
+            max_position_size_pct=12.0,
+            default_stop_loss_pct=2.5,
+            min_risk_reward_ratio=2.5,
+        )
+        engine = RiskEngine(config)
+        bal = AccountBalance(cash=100_000.0, equity=100_000.0, buying_power=100_000.0)
+
+        # 1. New trade registration
+        targets = engine.get_position_targets("SOL-USD", entry_price=100.0)
+        assert targets["stop_loss"] == 97.5  # 100 - 2.5%
+        assert targets["take_profit"] == 106.25  # 100 + (2.5 * 2.5)% = +6.25%
+
+        # 2. Monotonic stop ratchet
+        engine.update_position_stop("SOL-USD", 100.15)  # Break even
+        assert engine.get_position_targets("SOL-USD", entry_price=100.0)["stop_loss"] == 100.15
+        engine.update_position_stop("SOL-USD", 99.0)   # Lower stop should be ignored
+        assert engine.get_position_targets("SOL-USD", entry_price=100.0)["stop_loss"] == 100.15
+
+        # 3. Clean rejection when position allocation cap is already filled
+        # Max alloc = $100k * 12% * alloc_scale (~$9,120)
+        existing_pos = Position(
+            symbol="SOL-USD",
+            asset_class=AssetClass.CRYPTO,
+            quantity=90.0,
+            entry_price=100.0,
+            current_price=101.0,  # market value $9,090 (within $50 of cap)
+        )
+        add_signal = TradeSignal(
+            symbol="SOL-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.8,
+            current_price=101.0,
+            stop_loss=98.5,
+            take_profit=108.0,
+            metrics={"regime": "BULL_TREND", "allocation_factor": 1.0, "rsi": 54.0, "sma200": 80.0, "ema_ratio": 1.06, "atr": 1.2},
+        )
+        res_cap = engine.evaluate(add_signal, bal, positions=[existing_pos])
+        assert res_cap.is_approved is False
+        assert any("ya completada" in r or "allocation limit reached" in r for r in res_cap.rejection_reasons)
+
+        # 4. Cleanup on trade exit
+        engine.register_trade_exit("SOL-USD", is_loss=False)
+        assert "SOLUSD" not in engine._position_targets
+
+
 

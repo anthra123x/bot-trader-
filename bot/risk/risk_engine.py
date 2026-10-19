@@ -28,6 +28,48 @@ class RiskEngine:
         # Tiered Partial Take-Profit tracker
         self._partial_tp_executed: set[str] = set()
         self._partial_tp_stages: dict[str, int] = {}
+        # Persistent position targets tracker (Take-Profit & Stop-Loss)
+        self._position_targets: dict[str, dict[str, float]] = {}
+
+    def register_position_targets(self, symbol: str, entry_price: float, stop_loss: float, take_profit: float | None) -> None:
+        """Register active target take-profit and stop-loss levels for a position."""
+        norm_sym = normalize_symbol(symbol)
+        if take_profit is None:
+            default_sl_dist = entry_price * (self.config.default_stop_loss_pct / 100.0)
+            take_profit = round(entry_price + (default_sl_dist * self.config.min_risk_reward_ratio), 4)
+        self._position_targets[norm_sym] = {
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+        }
+
+    def get_position_targets(self, symbol: str, entry_price: float) -> dict[str, float]:
+        """Retrieve target TP and SL for a position. If not tracked, generates based on R:R config."""
+        norm_sym = normalize_symbol(symbol)
+        targets = self._position_targets.get(norm_sym)
+        if targets:
+            return targets
+
+        # Fallback calculation for preexisting positions or after process reboot
+        default_sl_distance = entry_price * (self.config.default_stop_loss_pct / 100.0)
+        fallback_sl = round(entry_price - default_sl_distance, 4)
+        min_reward = default_sl_distance * self.config.min_risk_reward_ratio
+        fallback_tp = round(entry_price + min_reward, 4)
+
+        self._position_targets[norm_sym] = {
+            "entry_price": entry_price,
+            "stop_loss": fallback_sl,
+            "take_profit": fallback_tp,
+        }
+        return self._position_targets[norm_sym]
+
+    def update_position_stop(self, symbol: str, new_stop: float) -> None:
+        """Update ratcheted stop loss for an open position."""
+        norm_sym = normalize_symbol(symbol)
+        if norm_sym in self._position_targets:
+            curr_sl = self._position_targets[norm_sym]["stop_loss"]
+            if new_stop > curr_sl:
+                self._position_targets[norm_sym]["stop_loss"] = new_stop
 
     def register_trade_exit(self, symbol: str, is_loss: bool = False) -> None:
         """Register trade exit to activate Freqtrade CooldownPeriod and StoplossGuard."""
@@ -39,11 +81,14 @@ class RiskEngine:
         self._partial_tp_executed.discard(symbol)
         self._partial_tp_stages.pop(norm_sym, None)
         self._partial_tp_stages.pop(symbol, None)
+        self._position_targets.pop(norm_sym, None)
+        self._position_targets.pop(symbol, None)
         if is_loss:
             self._symbol_cooldowns[norm_sym] = now
             self._recent_stoploss_events.append(now)
             # Prune events older than 1 hour
             self._recent_stoploss_events = [t for t in self._recent_stoploss_events if now - t < 3600.0]
+
 
     def evaluate_partial_take_profit(
         self,
@@ -391,6 +436,17 @@ class RiskEngine:
             )
 
         remaining_alloc = max(0.0, max_capital_allocation - existing_val)
+        if existing_val > 0 and remaining_alloc < 50.0:
+            rejection_reasons.append(
+                f"Posición para {signal.symbol} ya completada (${existing_val:,.2f} de ${max_capital_allocation:,.2f} máx). "
+                f"Capital preservado contra sobre-exposición."
+            )
+            return RiskValidationResult(
+                is_approved=False,
+                rejection_reasons=rejection_reasons,
+                risk_warnings=warnings,
+            )
+
         qty_by_alloc = remaining_alloc / current_price
 
         # c) Available liquidity (Bounded by Buying Power for equities to avoid broker rejection)
@@ -442,11 +498,23 @@ class RiskEngine:
                     f"R:R original ({rr_ratio:.2f}:1) elevado asimétricamente a {self.config.min_risk_reward_ratio:.1f}:1 (${take_profit:,.2f}) para maximizar margen de ganancia."
                 )
 
+        final_sl = round(stop_loss, 4)
+        final_tp = round(take_profit, 4) if take_profit else None
+
+        # Register position target levels for persistent tracking and exit execution
+        self.register_position_targets(
+            symbol=signal.symbol,
+            entry_price=current_price,
+            stop_loss=final_sl,
+            take_profit=final_tp,
+        )
+
         return RiskValidationResult(
             is_approved=True,
             adjusted_quantity=final_qty,
             allocated_capital=allocated_capital,
-            stop_loss_price=round(stop_loss, 4),
-            take_profit_price=round(take_profit, 4) if take_profit else None,
+            stop_loss_price=final_sl,
+            take_profit_price=final_tp,
             risk_warnings=warnings,
         )
+

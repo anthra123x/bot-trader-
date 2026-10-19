@@ -374,6 +374,8 @@ class BotRunner:
                 if current_stage == 1:
                     break_even_price = round(p.entry_price * 1.0015, 4)
                     p.stop_loss_price = max(p.stop_loss_price or 0.0, break_even_price)
+                    if hasattr(self.risk_engine, "update_position_stop"):
+                        self.risk_engine.update_position_stop(p.symbol, break_even_price)
                     logger.info(
                         "[PARTIAL_TAKE_PROFIT - ETAPA 1 (+1.2%%)] 💰 Toma parcial ejecutada para %s: Vendiendo %.6f u a $%.2f (PnL: +$%.2f / +%.2f%%). Stop elevado a Break-Even ($%.2f).",
                         p.symbol, partial_qty, curr_price, partial_pnl_dollars, partial_pnl_pct, break_even_price
@@ -381,10 +383,13 @@ class BotRunner:
                 else:
                     guaranteed_profit_price = round(p.entry_price * 1.015, 4)
                     p.stop_loss_price = max(p.stop_loss_price or 0.0, guaranteed_profit_price)
+                    if hasattr(self.risk_engine, "update_position_stop"):
+                        self.risk_engine.update_position_stop(p.symbol, guaranteed_profit_price)
                     logger.info(
                         "[PARTIAL_TAKE_PROFIT - ETAPA 2 (+3.0%%)] 🚀 Cosecha de beneficios mayores para %s: Vendiendo %.6f u a $%.2f (PnL: +$%.2f / +%.2f%%). Stop asegurado a +1.50%% ($%.2f).",
                         p.symbol, partial_qty, curr_price, partial_pnl_dollars, partial_pnl_pct, guaranteed_profit_price
                     )
+
 
                 partial_order = Order(
                     order_id=str(uuid.uuid4())[:8],
@@ -462,8 +467,17 @@ class BotRunner:
                         logger.warning("[NEON] Could not save rebalance order to Neon: %s", e)
                     closed_orders.append(executed_rebal)
 
-            default_sl = p.entry_price * (1.0 - (self.config.risk.default_stop_loss_pct / 100.0))
-            current_sl = p.stop_loss_price or default_sl
+            # Retrieve persistent target levels (Take-Profit & Stop-Loss) from RiskEngine
+            if hasattr(self.risk_engine, "get_position_targets"):
+                targets = self.risk_engine.get_position_targets(p.symbol, p.entry_price)
+                current_sl = max(targets["stop_loss"], p.stop_loss_price or 0.0)
+                target_tp = targets["take_profit"]
+            else:
+                default_sl = p.entry_price * (1.0 - (self.config.risk.default_stop_loss_pct / 100.0))
+                current_sl = p.stop_loss_price or default_sl
+                target_tp = p.entry_price * (1.0 + (self.config.risk.default_stop_loss_pct * self.config.risk.min_risk_reward_ratio / 100.0))
+
+            p.take_profit_price = target_tp
 
             # Calculate LEAN trailing stop with per-symbol volatility adaptation
             new_sl, ratcheted = self.risk_engine.calculate_trailing_stop(
@@ -475,26 +489,34 @@ class BotRunner:
 
             if ratcheted:
                 p.stop_loss_price = new_sl
+                if hasattr(self.risk_engine, "update_position_stop"):
+                    self.risk_engine.update_position_stop(p.symbol, new_sl)
                 logger.info(
                     "Trailing Stop for %s ratcheted UP to $%.2f (peak profit protection)",
                     p.symbol, new_sl,
                 )
 
-            # Check if stop loss was crossed
-            should_exit = curr_price <= new_sl
-            # Check take profit if defined
-            if p.take_profit_price and curr_price >= p.take_profit_price:
-                should_exit = True
+            # Check if target take profit was reached (Harvesting at peak!) or stop loss crossed
+            is_target_tp = p.take_profit_price is not None and curr_price >= p.take_profit_price
+            is_stop_loss = curr_price <= new_sl
+            should_exit = is_target_tp or is_stop_loss
 
             if should_exit:
                 pnl_dollars = (curr_price - p.entry_price) * p.quantity
                 pnl_pct = ((curr_price - p.entry_price) / p.entry_price) * 100.0
                 is_loss = pnl_dollars < 0
 
-                logger.warning(
-                    "Protective exit triggered for %s at $%.2f (Stop: $%.2f, PnL: $%.2f / %.2f%%)",
-                    p.symbol, curr_price, new_sl, pnl_dollars, pnl_pct,
-                )
+                if is_target_tp:
+                    logger.info(
+                        "[TARGET_TAKE_PROFIT] 🎯 OBJETIVO R:R ALCANZADO para %s a $%.2f (Meta: $%.2f, PnL: +$%.2f / +%.2f%%). Cosechando 100%% en el techo.",
+                        p.symbol, curr_price, p.take_profit_price, pnl_dollars, pnl_pct,
+                    )
+                else:
+                    logger.warning(
+                        "Protective exit triggered for %s at $%.2f (Stop: $%.2f, PnL: $%.2f / %.2f%%)",
+                        p.symbol, curr_price, new_sl, pnl_dollars, pnl_pct,
+                    )
+
 
                 sell_order = Order(
                     order_id=str(uuid.uuid4())[:8],
