@@ -135,6 +135,16 @@ class BotRunner:
         from bot.risk.regime_specialist import REGIME_SPECIALIST
         current_regime_obj = REGIME_SPECIALIST.analyze_market_regime(symbol.replace("/", "-"))
         current_regime_name = current_regime_obj.regime.value
+        if "market_prudence" not in signal.metrics:
+            signal.metrics["market_prudence"] = current_regime_obj.prudence.value
+            signal.metrics["prudence_score"] = current_regime_obj.prudence_score
+            signal.metrics["prudence_directive"] = current_regime_obj.prudence_directive
+            signal.metrics["prudence_multiplier"] = current_regime_obj.prudence_multiplier
+            if current_regime_obj.web_sentiment:
+                signal.metrics["sentiment_score"] = current_regime_obj.web_sentiment.sentiment_score
+                signal.metrics["sentiment_label"] = current_regime_obj.web_sentiment.sentiment_label
+                signal.metrics["fear_greed_value"] = current_regime_obj.web_sentiment.fear_greed_value
+
         if "HIGH_VOLATILITY" in current_regime_name or "BEAR" in current_regime_name:
             min_conf = max(base_min_conf, 0.75)
         else:
@@ -242,25 +252,48 @@ class BotRunner:
                 for p in active_pos
             ]
 
-            # Gather Macroeconomic Regime & Web Sentiment
+            # Gather Macroeconomic Regime, Web Sentiment & Real-Time Market Research
             regime_text = ""
+            market_research_text = ""
             reg_obj = None
             try:
-                from bot.risk.regime_specialist import REGIME_SPECIALIST
+                from bot.risk.regime_specialist import REGIME_SPECIALIST, MarketPrudence
                 reg_obj = REGIME_SPECIALIST.analyze_market_regime(symbol)
                 regime_text = f"- Regime: {reg_obj.regime_display} (Vol Score: {reg_obj.volatility_score:.1f}/100, ATR Ratio: {reg_obj.atr_ratio_90d:.2f}x)"
                 if reg_obj.web_sentiment:
                     regime_text += f"\n- Web Sentiment: {reg_obj.web_sentiment.sentiment_label} (Fear & Greed Index: {reg_obj.web_sentiment.fear_greed_value}/100, Trend Bias: {reg_obj.trend_bias})"
+
+                market_research_text = (
+                    f"🚨 INFORME Y DIRECTRIZ VINCULANTE DEL SUBAGENTE DE INVESTIGACIÓN DE MERCADO:\n"
+                    f"- Estado de Prudencia: {reg_obj.prudence.value} (Score de Seguridad: {reg_obj.prudence_score:.0f}/100)\n"
+                    f"- Dinámica y Flujo en Tiempo Real: {reg_obj.trend_bias} | Régimen: {reg_obj.regime_display}\n"
+                    f"- Termómetro Macro & Sentimiento Web: {reg_obj.web_sentiment.sentiment_label if reg_obj.web_sentiment else 'Neutral'} (FGI: {reg_obj.web_sentiment.fear_greed_value if reg_obj.web_sentiment else 50}/100)\n"
+                    f"- Directriz Operativa: {reg_obj.prudence_directive}\n"
+                    f"- REGLA INSTITUCIONAL: Todos los subagentes (Bull, Bear, Trader, Risk) deben supeditar "
+                    f"sus tesis al estado de prudencia del mercado. Si el estado es {MarketPrudence.IMPRUDENT_ADVERSE_VETO.value}, "
+                    f"está estrictamente PROHIBIDO proponer compras agresivas; el capital debe preservarse al 100% en liquidez."
+                )
             except Exception:
                 pass
 
             if reg_obj:
                 screen_res.metrics["regime"] = reg_obj.regime.value
                 screen_res.metrics["allocation_factor"] = reg_obj.allocation_factor
-                if reg_obj.allocation_factor == 0.0 and screen_res.bias == "BUY":
+                screen_res.metrics["market_prudence"] = reg_obj.prudence.value
+                screen_res.metrics["prudence_score"] = reg_obj.prudence_score
+                screen_res.metrics["prudence_directive"] = reg_obj.prudence_directive
+                screen_res.metrics["prudence_multiplier"] = reg_obj.prudence_multiplier
+                if reg_obj.web_sentiment:
+                    screen_res.metrics["sentiment_score"] = reg_obj.web_sentiment.sentiment_score
+                    screen_res.metrics["sentiment_label"] = reg_obj.web_sentiment.sentiment_label
+                    screen_res.metrics["fear_greed_value"] = reg_obj.web_sentiment.fear_greed_value
+
+                # Zero-token Preventive Veto triggered by Market Research Subagent
+                from bot.risk.regime_specialist import MarketPrudence
+                if (reg_obj.allocation_factor == 0.0 or reg_obj.prudence == MarketPrudence.IMPRUDENT_ADVERSE_VETO) and screen_res.bias == "BUY":
                     logger.info(
-                        "[REGIME_VETO] 🛡️ %s en %s (Alloc Factor: 0.0). Veto preventivo a compras durante régimen bajista/desplome; capital resguardado en efectivo (0 tokens gastados).",
-                        symbol, reg_obj.regime_display
+                        "[MARKET_RESEARCH_VETO] 🛡️ %s en %s (%s). Veto preventivo del subagente de investigación; capital 100%% resguardado en efectivo (0 tokens gastados).",
+                        symbol, reg_obj.regime_display, reg_obj.prudence_directive
                     )
                     return None
 
@@ -294,6 +327,7 @@ class BotRunner:
                 cash=bal.cash,
                 currency=bal.currency or "USD",
                 positions=port_positions,
+                market_research_context=market_research_text,
                 regime_context=regime_text,
                 quant_context=quant_text,
                 lessons_context=lessons_text,

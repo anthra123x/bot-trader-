@@ -160,10 +160,13 @@ class EnhancedPortfolioContext(PortfolioContext):
     quant_context: str = ""
     regime_context: str = ""
     lessons_context: str = ""
+    market_research_context: str = ""
 
     def render(self, ticker: str) -> str:
         base = super().render(ticker)
         extra = []
+        if self.market_research_context:
+            extra.append(f"\nReal-Time Market Research Specialist Intelligence & Prudence Directive:\n{self.market_research_context}")
         if self.regime_context:
             extra.append(f"\nMacroeconomic Regime & Market Sentiment:\n{self.regime_context}")
         if self.quant_context:

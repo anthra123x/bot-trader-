@@ -385,6 +385,22 @@ class RiskEngine:
                 pattern_multiplier = pattern_check.risk_multiplier
                 warnings.append(pattern_check.warning_message or f"Asignación reducida al {pattern_multiplier*100:.0f}% por similitud con patrón fallido.")
 
+        # 9. Real-Time Market Research & Prudence Gatekeeper
+        market_prudence = signal.metrics.get("market_prudence")
+        prudence_directive = signal.metrics.get("prudence_directive") or "Condiciones adversas detectadas por investigación de mercado"
+        prudence_multiplier = float(signal.metrics.get("prudence_multiplier", 1.0))
+        if signal.action == OrderSide.BUY:
+            if market_prudence == "IMPRUDENT_ADVERSE_VETO":
+                rejection_reasons.append(
+                    f"VETO DE INVESTIGACIÓN DE MERCADO: El subagente de investigación dictamina "
+                    f"entorno IMPRUDENTE ({prudence_directive}). Capital protegido al 100% en liquidez."
+                )
+                return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+            elif market_prudence == "CAUTION_HEADWINDS" or prudence_multiplier < 1.0:
+                warnings.append(
+                    f"ADVERTENCIA DE MERCADO: Subagente de investigación detecta turbulencia/viento en contra "
+                    f"({prudence_directive}). Asignación prudencial ajustada al {prudence_multiplier*100:.0f}%."
+                )
 
         # 3. Position check for SELL orders and allocation limits
         existing_position = next((p for p in positions if normalize_symbol(p.symbol) == norm_sym), None)
@@ -474,7 +490,7 @@ class RiskEngine:
         qty_by_cash = safe_liquidity / current_price
 
         regime_sizing_factor = alloc_factor if 0.0 < alloc_factor < 1.0 else 1.0
-        target_qty = min(qty_by_risk, qty_by_alloc, qty_by_cash) * pattern_multiplier * regime_sizing_factor
+        target_qty = min(qty_by_risk, qty_by_alloc, qty_by_cash) * pattern_multiplier * regime_sizing_factor * prudence_multiplier
 
         # Quantize shares (Equities: integer shares; Crypto: up to 6 decimals)
         if signal.asset_class == AssetClass.EQUITY:

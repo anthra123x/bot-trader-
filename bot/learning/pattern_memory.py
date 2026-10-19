@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -214,24 +215,25 @@ class PatternMemory:
             logger.debug("SQLite pattern read failed: %s", e)
 
         # Dual-check with Neon PostgreSQL cloud patterns (crucial for ephemeral cloud instances)
-        try:
-            from bot.database.neon_repo import get_neon_repo
-            neon_repo = get_neon_repo()
-            if neon_repo and neon_repo.is_connected:
-                neon_rows = neon_repo.get_learned_patterns(limit=50)
-                for nr in neon_rows:
-                    if nr.get("outcome") == "LOSS":
-                        metrics = nr.get("metrics") or {}
-                        candidate_patterns.append({
-                            "mistake_signature": nr.get("mistake_signature"),
-                            "lesson_learned": nr.get("lesson_learned"),
-                            "rsi_entry": float(metrics.get("rsi_entry", 50.0)),
-                            "ema_ratio": float(metrics.get("ema_ratio", 1.0)),
-                            "volatility_atr_pct": float(metrics.get("volatility_atr_pct", 2.0)),
-                            "pnl_pct": float(metrics.get("pnl_pct", -1.0)),
-                        })
-        except Exception as e:
-            logger.debug("Failed to augment patterns from Neon: %s", e)
+        if not os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                from bot.database.neon_repo import get_neon_repo
+                neon_repo = get_neon_repo()
+                if neon_repo and neon_repo.is_connected:
+                    neon_rows = neon_repo.get_learned_patterns(limit=50)
+                    for nr in neon_rows:
+                        if nr.get("outcome") == "LOSS":
+                            metrics = nr.get("metrics") or {}
+                            candidate_patterns.append({
+                                "mistake_signature": nr.get("mistake_signature"),
+                                "lesson_learned": nr.get("lesson_learned"),
+                                "rsi_entry": float(metrics.get("rsi_entry", 50.0)),
+                                "ema_ratio": float(metrics.get("ema_ratio", 1.0)),
+                                "volatility_atr_pct": float(metrics.get("volatility_atr_pct", 2.0)),
+                                "pnl_pct": float(metrics.get("pnl_pct", -1.0)),
+                            })
+            except Exception as e:
+                logger.debug("Failed to augment patterns from Neon: %s", e)
 
         if not candidate_patterns:
             return PatternCheckResult(is_safe=True, risk_multiplier=1.0)

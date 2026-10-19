@@ -32,6 +32,12 @@ class MarketRegime(StrEnum):
     DEFENSIVE_BEAR_BREAKDOWN = "DEFENSIVE_BEAR_BREAKDOWN"  # Bearish breakdown -> Veto buys, capital preservation
 
 
+class MarketPrudence(StrEnum):
+    PRUDENT_FAVORABLE = "PRUDENT_FAVORABLE"          # Optimal market conditions, aligned trend & sentiment
+    CAUTION_HEADWINDS = "CAUTION_HEADWINDS"          # Choppy or high volatility, moderate headwinds -> 50% sizing
+    IMPRUDENT_ADVERSE_VETO = "IMPRUDENT_ADVERSE_VETO" # Hostile flow, panic or breakdown -> 100% VETO
+
+
 @dataclass
 class WebInvestigationResult:
     """Live web-investigated market intelligence, sentiment, and macro headlines."""
@@ -61,6 +67,10 @@ class RegimeAnalysis:
     rationale: str
     analyzed_at: datetime
     web_sentiment: WebInvestigationResult | None = None
+    prudence: MarketPrudence = MarketPrudence.PRUDENT_FAVORABLE
+    prudence_score: float = 85.0
+    prudence_directive: str = "Condiciones favorables para operar."
+    prudence_multiplier: float = 1.0
 
 
 class MarketRegimeSpecialist:
@@ -289,6 +299,33 @@ class MarketRegimeSpecialist:
 
             vol_score = min(100.0, max(0.0, (realized_vol / 80.0) * 100.0))
 
+            # Calculate Real-Time Market Research Prudence Assessment
+            if regime == MarketRegime.DEFENSIVE_BEAR_BREAKDOWN or (web_intel.sentiment_score <= -0.40 and trend_bias == "BEARISH") or web_intel.fear_greed_value <= 18:
+                prudence = MarketPrudence.IMPRUDENT_ADVERSE_VETO
+                prudence_score = 15.0
+                prudence_mult = 0.0
+                prudence_dir = (
+                    f"VETO: Flujo de mercado hostil y adverso ({regime_display}). "
+                    f"Fuerte sesgo vendedor con sentimiento {web_intel.sentiment_label} (FGI: {web_intel.fear_greed_value}/100). "
+                    f"Imprudente abrir compras; capital protegido al 100% en liquidez."
+                )
+            elif regime == MarketRegime.HIGH_VOLATILITY_EXPANSION or web_intel.sentiment_score <= -0.15 or atr_ratio > 1.45 or realized_vol > 55.0:
+                prudence = MarketPrudence.CAUTION_HEADWINDS
+                prudence_score = 55.0
+                prudence_mult = 0.5
+                prudence_dir = (
+                    f"PRECAUCIÓN: Turbulencia o volatilidad anómala ({realized_vol:.1f}% an.) con sentimiento {web_intel.sentiment_label}. "
+                    f"Asignación reducida al 50% y exigencia de alta convicción técnica."
+                )
+            else:
+                prudence = MarketPrudence.PRUDENT_FAVORABLE
+                prudence_score = 90.0
+                prudence_mult = 1.0
+                prudence_dir = (
+                    f"FAVORABLE: Estructura técnica alcista sobre SMA-50 con volatilidad controlada y sentimiento {web_intel.sentiment_label}. "
+                    f"Condiciones óptimas para ejecutar setups de alta probabilidad."
+                )
+
             analysis = RegimeAnalysis(
                 regime=regime,
                 regime_display=regime_display,
@@ -304,12 +341,16 @@ class MarketRegimeSpecialist:
                 rationale=rationale,
                 analyzed_at=datetime.now(timezone.utc),
                 web_sentiment=web_intel,
+                prudence=prudence,
+                prudence_score=prudence_score,
+                prudence_directive=prudence_dir,
+                prudence_multiplier=prudence_mult,
             )
 
             self._cache[cache_key] = (now, analysis)
             logger.info(
-                "[REGIME_SPECIALIST] 🌐 Régimen: %s | Vol: %.1f%% (Score: %.0f) | FGI: %d (%s) | TP: %.1fx, SL: %.1fx, BE: +%.1f%%",
-                regime.value, realized_vol, vol_score, web_intel.fear_greed_value, web_intel.sentiment_label, tp_mult, sl_mult, be_pct
+                "[REGIME_SPECIALIST] 🌐 Régimen: %s | Prudencia: %s (%.0f/100) | Vol: %.1f%% | FGI: %d (%s) | AllocMult: %.1fx",
+                regime.value, prudence.value, prudence_score, realized_vol, web_intel.fear_greed_value, web_intel.sentiment_label, prudence_mult
             )
             return analysis
 
@@ -330,6 +371,10 @@ class MarketRegimeSpecialist:
                 rationale="Fallback seguro por defecto.",
                 analyzed_at=datetime.now(timezone.utc),
                 web_sentiment=web_intel,
+                prudence=MarketPrudence.PRUDENT_FAVORABLE,
+                prudence_score=75.0,
+                prudence_directive="Modo defensivo estándar (fallback).",
+                prudence_multiplier=1.0,
             )
 
 

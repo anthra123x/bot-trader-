@@ -115,6 +115,76 @@ class TestRiskEngine:
         assert res.is_approved is False
         assert any("no open position held" in r for r in res.rejection_reasons)
 
+    def test_market_research_prudence_veto(self):
+        balance = AccountBalance(
+            cash=100_000.0,
+            equity=100_000.0,
+            buying_power=100_000.0,
+            initial_day_equity=100_000.0,
+        )
+        signal = TradeSignal(
+            symbol="BTC-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            current_price=60_000.0,
+            stop_loss=58_000.0,
+            metrics={
+                "market_prudence": "IMPRUDENT_ADVERSE_VETO",
+                "prudence_directive": "Flujo de mercado bajista con alta presión vendedora.",
+            },
+        )
+        res = self.engine.evaluate(signal, balance, positions=[])
+        assert res.is_approved is False
+        assert any("VETO DE INVESTIGACIÓN DE MERCADO" in r for r in res.rejection_reasons)
+
+    def test_market_research_caution_sizing(self):
+        balance = AccountBalance(
+            cash=100_000.0,
+            equity=100_000.0,
+            buying_power=100_000.0,
+            initial_day_equity=100_000.0,
+        )
+        # Normal signal without caution
+        signal_normal = TradeSignal(
+            symbol="ETH-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.85,
+            current_price=2000.0,
+            stop_loss=1940.0,
+            metrics={"rsi": 52.0, "ema_ratio": 1.02, "atr": 40.0},
+        )
+        res_normal = self.engine.evaluate(signal_normal, balance, positions=[])
+        assert res_normal.is_approved is True
+
+        # Signal with caution (50% sizing)
+        signal_caution = TradeSignal(
+            symbol="ETH-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.85,
+            current_price=2000.0,
+            stop_loss=1940.0,
+            metrics={
+                "rsi": 52.0,
+                "ema_ratio": 1.02,
+                "atr": 40.0,
+                "market_prudence": "CAUTION_HEADWINDS",
+                "prudence_multiplier": 0.5,
+                "prudence_directive": "Turbulencia elevada en la red.",
+            },
+        )
+        res_caution = self.engine.evaluate(signal_caution, balance, positions=[])
+        assert res_caution.is_approved is True
+        assert res_caution.adjusted_quantity == round(res_normal.adjusted_quantity * 0.5, 6)
+        assert any("ADVERTENCIA DE MERCADO" in w for w in res_caution.risk_warnings)
+
 
 class TestPaperBroker:
     def test_paper_broker_ledger_flow(self, tmp_path: Path, monkeypatch):
@@ -177,6 +247,7 @@ class TestAlpacaBroker:
         monkeypatch.setenv("ALPACA_SECRET_KEY", "")
         monkeypatch.setenv("ALPACA_ACCESS_TOKEN", "")
         monkeypatch.setattr("pathlib.Path.exists", lambda self: False)
+        monkeypatch.setattr("bot.database.neon_repo.get_neon_repo", lambda: None)
 
         broker = AlpacaBroker(api_key="", secret_key="")
         assert broker._has_direct_keys() is False
