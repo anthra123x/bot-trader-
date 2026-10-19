@@ -1,6 +1,11 @@
-// ==============================================================================
-// DYNAMIC BACKEND RESOLVER (Vercel / Cloud / Multi-Environment Support)
-// ==============================================================================
+// Auto-migrate stale Render manual override so Vercel's native serverless functions take over
+try {
+  const existingBackend = localStorage.getItem('TRADINGAGENTS_BACKEND_URL');
+  if (existingBackend && existingBackend.includes('onrender.com')) {
+    localStorage.removeItem('TRADINGAGENTS_BACKEND_URL');
+  }
+} catch (e) {}
+
 function getBackendEndpoint(url) {
   if (typeof url === 'string' && (url.startsWith('/api') || url.startsWith('/health'))) {
     const custom = localStorage.getItem('TRADINGAGENTS_BACKEND_URL');
@@ -29,18 +34,19 @@ function updateBackendBadge() {
       badge.innerText = `🔗 ${cleanHost.slice(0, 18)}`;
       badge.title = `Conectado a: ${custom} (Click para cambiar URL)`;
     } else {
-      badge.innerText = `🔗 Backend Auto`;
-      badge.title = `Conectado al host actual / Render proxy (Click para cambiar URL)`;
+      badge.innerText = `⚡ Vercel Cloud`;
+      badge.title = `Vercel Serverless conectado a Alpaca en tiempo real (Click para cambiar URL)`;
     }
   }
   if (dot) dot.className = 'status-dot online';
 }
 
+
 function promptBackendUrl() {
   const current = localStorage.getItem('TRADINGAGENTS_BACKEND_URL') || '';
   const newUrl = prompt(
     'Configurar URL del Servidor Backend (Render Cloud o Túnel):\n\n' +
-    'Ejemplo: https://tradingagents-engine.onrender.com\n' +
+    'Ejemplo: https://bot-trader-dear.onrender.com\n' +
     'Deja vacío para usar el backend automático / Vercel proxy:',
     current
   );

@@ -6,12 +6,32 @@
       "destination": "/:match*"
     },
     {
-      "source": "/api/:match*",
-      "destination": "https://tradingagents-engine.onrender.com/api/:match*"
+      "source": "/api/logs",
+      "destination": "https://bot-trader-dear.onrender.com/api/logs"
+    },
+    {
+      "source": "/api/market/:path*",
+      "destination": "https://bot-trader-dear.onrender.com/api/market/:path*"
+    },
+    {
+      "source": "/api/notifications",
+      "destination": "https://bot-trader-dear.onrender.com/api/notifications"
+    },
+    {
+      "source": "/api/scheduler/:path*",
+      "destination": "https://bot-trader-dear.onrender.com/api/scheduler/:path*"
+    },
+    {
+      "source": "/api/equity/:path*",
+      "destination": "https://bot-trader-dear.onrender.com/api/equity/:path*"
+    },
+    {
+      "source": "/api/metrics",
+      "destination": "https://bot-trader-dear.onrender.com/api/metrics"
     },
     {
       "source": "/health",
-      "destination": "https://tradingagents-engine.onrender.com/health"
+      "destination": "https://bot-trader-dear.onrender.com/health"
     }
   ]
 }
