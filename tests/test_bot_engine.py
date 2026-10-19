@@ -370,3 +370,92 @@ class TestLeanAndFreqtradeProtections:
         should_rebal, trim_qty, reason = engine.evaluate_portfolio_rebalancing(pos_loss, current_price=100.0, total_equity=100_000.0)
         assert should_rebal is False
         assert trim_qty == 0.0
+
+    def test_multi_stage_take_profit_flow(self):
+        config = BotRiskConfig(
+            enable_partial_take_profit=True,
+            partial_take_profit_threshold_pct=1.2,
+            partial_take_profit_ratio=0.35,
+            enable_multi_stage_tp=True,
+            stage2_take_profit_threshold_pct=3.0,
+            stage2_take_profit_ratio=0.45,
+        )
+        engine = RiskEngine(config)
+
+        # 1. At +0.8%, below stage 1 -> False
+        should_tp, qty = engine.evaluate_partial_take_profit("SOL-USD", current_price=100.8, entry_price=100.0, current_qty=100.0)
+        assert should_tp is False
+
+        # 2. At +1.2%, stage 1 triggered -> 35% sold
+        should_tp, qty = engine.evaluate_partial_take_profit("SOL-USD", current_price=101.2, entry_price=100.0, current_qty=100.0)
+        assert should_tp is True
+        assert qty == 35.0
+        engine.register_partial_tp("SOL-USD")
+        assert engine.get_tp_stage("SOL-USD") == 1
+
+        # 3. At +1.5%, between stage 1 and stage 2 -> False
+        should_tp, qty = engine.evaluate_partial_take_profit("SOL-USD", current_price=101.5, entry_price=100.0, current_qty=65.0)
+        assert should_tp is False
+
+        # 4. At +3.2%, stage 2 triggered -> 45% of remaining 65.0 sold (29.25 u)
+        should_tp, qty = engine.evaluate_partial_take_profit("SOL-USD", current_price=103.2, entry_price=100.0, current_qty=65.0)
+        assert should_tp is True
+        assert qty == 29.25
+        engine.register_partial_tp("SOL-USD")
+        assert engine.get_tp_stage("SOL-USD") == 2
+
+        # 5. Subsequent ticks -> False (completed both stages)
+        should_tp, qty = engine.evaluate_partial_take_profit("SOL-USD", current_price=104.0, entry_price=100.0, current_qty=35.75)
+        assert should_tp is False
+
+    def test_quality_gate_and_crypto_correlation(self):
+        config = BotRiskConfig(
+            min_signal_confidence=0.70,
+            max_concurrent_crypto_positions=2,
+        )
+        engine = RiskEngine(config)
+        bal = AccountBalance(cash=100_000.0, equity=100_000.0, buying_power=100_000.0)
+
+        # Test Quality Gate rejection when confidence < 0.70
+        low_conf_signal = TradeSignal(
+            symbol="BTC-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.55,
+            current_price=80_000.0,
+            stop_loss=78_000.0,
+        )
+        res = engine.evaluate(low_conf_signal, bal, positions=[])
+        assert res.is_approved is False
+        assert any("Quality Gate" in r for r in res.rejection_reasons)
+
+        # Test Crypto Correlation Gate when 2 crypto positions are already open
+        high_conf_signal = TradeSignal(
+            symbol="DOGE-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.85,
+            current_price=0.10,
+            stop_loss=0.096,
+        )
+        open_crypto = [
+            Position(symbol="BTC-USD", asset_class=AssetClass.CRYPTO, quantity=1.0, entry_price=80_000.0, current_price=80_000.0),
+            Position(symbol="ETH-USD", asset_class=AssetClass.CRYPTO, quantity=10.0, entry_price=2400.0, current_price=2400.0),
+        ]
+        res_corr = engine.evaluate(high_conf_signal, bal, positions=open_crypto)
+        assert res_corr.is_approved is False
+        assert any("Límite de correlación cripto alcanzado" in r for r in res_corr.rejection_reasons)
+
+    def test_quant_screener_divergence_algorithm(self):
+        from bot.risk.quant_screener import QuantScreener
+
+        # Synthetic prices: Lower Low in price with Higher Low in RSI (Bullish Divergence)
+        closes = [100.0] * 10 + [90.0, 92.0, 91.0, 93.0, 88.0]  # past low 90, current 88 (Lower Low)
+        rsis = [50.0] * 10 + [25.0, 32.0, 30.0, 35.0, 38.0]     # past rsi 25, current 38 (Higher Low)
+        div_type, desc = QuantScreener._detect_divergence(closes, rsis, lookback=5)
+        assert div_type == "BULLISH"
+        assert "Divergencia Alcista RSI" in desc

@@ -130,6 +130,15 @@ class BotRunner:
             symbol, rating, action.value if action else "HOLD", current_price
         )
 
+        # Quality Gate Check: High-Conviction Institutional Filter
+        min_conf = getattr(self.config.risk, "min_signal_confidence", 0.0) or 0.68
+        if signal.action == OrderSide.BUY and signal.confidence < min_conf:
+            logger.info(
+                "[QUALITY_GATE] 🛡️ %s: Convicción (%.0f%%) inferior al umbral mínimo institucional (%.0f%%). Entrada pausada para maximizar Win Rate (0 capital arriesgado).",
+                symbol, signal.confidence * 100.0, min_conf * 100.0
+            )
+            return None
+
         # Risk check
         risk_result: RiskValidationResult = self.risk_engine.evaluate(signal, balance, positions)
         self.notifier.notify_signal_and_risk(signal, risk_result)
@@ -340,7 +349,7 @@ class BotRunner:
 
             p.current_price = curr_price
 
-            # Area A: Tiered Partial Take-Profit (Scale-Out Profit Harvesting)
+            # Area A: Multi-Stage Partial Take-Profit (Scale-Out Profit Harvesting)
             should_partial_tp, partial_qty = self.risk_engine.evaluate_partial_take_profit(
                 symbol=p.symbol,
                 current_price=curr_price,
@@ -348,12 +357,25 @@ class BotRunner:
                 current_qty=p.quantity,
             )
             if should_partial_tp and 0 < partial_qty < p.quantity:
+                current_stage = self.risk_engine.get_tp_stage(p.symbol) + 1
                 partial_pnl_dollars = (curr_price - p.entry_price) * partial_qty
                 partial_pnl_pct = ((curr_price - p.entry_price) / p.entry_price) * 100.0
-                logger.info(
-                    "[PARTIAL_TAKE_PROFIT] 💰 Toma parcial ejecutada para %s: Vendiendo %.6f u a $%.2f (PnL: +$%.2f / +%.2f%%)",
-                    p.symbol, partial_qty, curr_price, partial_pnl_dollars, partial_pnl_pct
-                )
+
+                if current_stage == 1:
+                    break_even_price = round(p.entry_price * 1.0015, 4)
+                    p.stop_loss_price = max(p.stop_loss_price or 0.0, break_even_price)
+                    logger.info(
+                        "[PARTIAL_TAKE_PROFIT - ETAPA 1 (+1.2%%)] 💰 Toma parcial ejecutada para %s: Vendiendo %.6f u a $%.2f (PnL: +$%.2f / +%.2f%%). Stop elevado a Break-Even ($%.2f).",
+                        p.symbol, partial_qty, curr_price, partial_pnl_dollars, partial_pnl_pct, break_even_price
+                    )
+                else:
+                    guaranteed_profit_price = round(p.entry_price * 1.015, 4)
+                    p.stop_loss_price = max(p.stop_loss_price or 0.0, guaranteed_profit_price)
+                    logger.info(
+                        "[PARTIAL_TAKE_PROFIT - ETAPA 2 (+3.0%%)] 🚀 Cosecha de beneficios mayores para %s: Vendiendo %.6f u a $%.2f (PnL: +$%.2f / +%.2f%%). Stop asegurado a +1.50%% ($%.2f).",
+                        p.symbol, partial_qty, curr_price, partial_pnl_dollars, partial_pnl_pct, guaranteed_profit_price
+                    )
+
                 partial_order = Order(
                     order_id=str(uuid.uuid4())[:8],
                     symbol=p.symbol,
@@ -367,10 +389,6 @@ class BotRunner:
                 executed_partial = self.broker.submit_order(partial_order)
                 self.risk_engine.register_partial_tp(p.symbol)
                 p.quantity -= partial_qty
-
-                # Lock the remaining position in Break-Even (+0.15%)
-                break_even_price = round(p.entry_price * 1.0015, 4)
-                p.stop_loss_price = max(p.stop_loss_price or 0.0, break_even_price)
 
                 if hasattr(self.risk_engine, "pattern_memory") and self.risk_engine.pattern_memory:
                     try:

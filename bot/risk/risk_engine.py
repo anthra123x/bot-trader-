@@ -27,6 +27,7 @@ class RiskEngine:
         self._recent_stoploss_events: list[float] = []
         # Tiered Partial Take-Profit tracker
         self._partial_tp_executed: set[str] = set()
+        self._partial_tp_stages: dict[str, int] = {}
 
     def register_trade_exit(self, symbol: str, is_loss: bool = False) -> None:
         """Register trade exit to activate Freqtrade CooldownPeriod and StoplossGuard."""
@@ -36,6 +37,8 @@ class RiskEngine:
         self._peak_prices.pop(symbol, None)
         self._partial_tp_executed.discard(norm_sym)
         self._partial_tp_executed.discard(symbol)
+        self._partial_tp_stages.pop(norm_sym, None)
+        self._partial_tp_stages.pop(symbol, None)
         if is_loss:
             self._symbol_cooldowns[norm_sym] = now
             self._recent_stoploss_events.append(now)
@@ -54,22 +57,40 @@ class RiskEngine:
             return False, 0.0
 
         norm_sym = normalize_symbol(symbol)
-        if norm_sym in self._partial_tp_executed or symbol in self._partial_tp_executed:
-            return False, 0.0
-
+        stage = self._partial_tp_stages.get(norm_sym, 0)
         unrealized_profit_pct = ((current_price - entry_price) / entry_price) * 100.0
-        if unrealized_profit_pct >= self.config.partial_take_profit_threshold_pct:
+
+        # Stage 1: Initial scale-out threshold (+1.2%)
+        if stage == 0 and unrealized_profit_pct >= self.config.partial_take_profit_threshold_pct:
             partial_qty = round(current_qty * self.config.partial_take_profit_ratio, 6)
             if 0 < partial_qty < current_qty:
                 return True, partial_qty
 
+        # Stage 2: Secondary scale-out threshold (+3.0%)
+        if stage == 1 and getattr(self.config, "enable_multi_stage_tp", True):
+            stage2_thresh = getattr(self.config, "stage2_take_profit_threshold_pct", 3.0)
+            stage2_ratio = getattr(self.config, "stage2_take_profit_ratio", 0.45)
+            if unrealized_profit_pct >= stage2_thresh:
+                stage2_qty = round(current_qty * stage2_ratio, 6)
+                if 0 < stage2_qty < current_qty:
+                    return True, stage2_qty
+
         return False, 0.0
 
     def register_partial_tp(self, symbol: str) -> None:
-        """Mark partial take profit as executed for current position lifecycle."""
+        """Mark partial take profit stage as executed for current position lifecycle."""
         norm_sym = normalize_symbol(symbol)
+        curr_stage = self._partial_tp_stages.get(norm_sym, 0)
+        new_stage = curr_stage + 1
+        self._partial_tp_stages[norm_sym] = new_stage
+        self._partial_tp_stages[symbol] = new_stage
         self._partial_tp_executed.add(norm_sym)
         self._partial_tp_executed.add(symbol)
+
+    def get_tp_stage(self, symbol: str) -> int:
+        """Return current take profit stage executed for symbol (0=none, 1=stage 1, 2=stage 2)."""
+        norm_sym = normalize_symbol(symbol)
+        return self._partial_tp_stages.get(norm_sym, 0)
 
     def evaluate_portfolio_rebalancing(
         self,
@@ -249,6 +270,27 @@ class RiskEngine:
                 is_approved=False,
                 rejection_reasons=["Trade signal action is HOLD; no execution required."],
             )
+
+        # 2b. High-Conviction Institutional Quality Gate
+        min_required_conf = getattr(self.config, "min_signal_confidence", 0.0)
+        if signal.action == OrderSide.BUY and min_required_conf > 0 and signal.confidence < min_required_conf:
+            rejection_reasons.append(
+                f"Quality Gate: Convicción ({signal.confidence*100:.0f}%) inferior al umbral institucional "
+                f"mínimo ({min_required_conf*100:.0f}%). Solo se ejecutan operaciones A+ de alta probabilidad."
+            )
+            return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+
+        # 2c. Correlated Crypto Exposure Gatekeeper (Max concurrent crypto positions)
+        if signal.action == OrderSide.BUY and signal.asset_class == AssetClass.CRYPTO:
+            max_crypto_pos = getattr(self.config, "max_concurrent_crypto_positions", 4)
+            crypto_positions_count = sum(1 for p in positions if p.asset_class == AssetClass.CRYPTO and p.quantity > 0)
+            existing_pos = next((p for p in positions if normalize_symbol(p.symbol) == norm_sym), None)
+            if not existing_pos and crypto_positions_count >= max_crypto_pos:
+                rejection_reasons.append(
+                    f"Límite de correlación cripto alcanzado: {crypto_positions_count} activos en cartera "
+                    f"(máx: {max_crypto_pos}). Capital preservado contra riesgo sistémico de mercado."
+                )
+                return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
 
         # 3. Position check for SELL orders and allocation limits
         existing_position = next((p for p in positions if normalize_symbol(p.symbol) == norm_sym), None)

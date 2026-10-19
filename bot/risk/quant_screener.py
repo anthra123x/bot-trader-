@@ -12,6 +12,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 from stockstats import wrap
 
 from tradingagents.dataflows.vendors.yahoo.snapshot import _verified_rows
@@ -87,6 +88,34 @@ class QuantScreener:
             logger.debug("Notice checking BTC macro health: %s", e)
             return {"is_bearish": False, "regime": "UNKNOWN"}
 
+    @staticmethod
+    def _detect_divergence(closes: list[float], rsis: list[float], lookback: int = 14) -> tuple[str | None, str]:
+        """Detect regular Bullish or Bearish divergence over the lookback window with statistical edge."""
+        if len(closes) < lookback + 2 or len(rsis) < lookback + 2:
+            return None, ""
+        curr_c = closes[-1]
+        curr_rsi = rsis[-1]
+
+        # Bullish Divergence: Lower Low in price with Higher Low in RSI (momentum exhaust)
+        past_c_window = closes[-lookback:-2]
+        past_rsi_window = rsis[-lookback:-2]
+        min_c_idx = int(np.argmin(past_c_window))
+        past_min_c = past_c_window[min_c_idx]
+        past_min_rsi = past_rsi_window[min_c_idx]
+
+        if curr_c <= past_min_c * 1.008 and curr_rsi > (past_min_rsi + 3.0) and curr_rsi < 55.0:
+            return "BULLISH", f"Divergencia Alcista RSI ({curr_rsi:.1f} vs {past_min_rsi:.1f} anterior con precio en nuevo mínimo)"
+
+        # Bearish Divergence: Higher High in price with Lower High in RSI
+        max_c_idx = int(np.argmax(past_c_window))
+        past_max_c = past_c_window[max_c_idx]
+        past_max_rsi = past_rsi_window[max_c_idx]
+
+        if curr_c >= past_max_c * 0.992 and curr_rsi < (past_max_rsi - 3.0) and curr_rsi > 45.0:
+            return "BEARISH", f"Divergencia Bajista RSI ({curr_rsi:.1f} vs {past_max_rsi:.1f} anterior con precio en nuevo máximo)"
+
+        return None, ""
+
     def screen(self, symbol: str, as_of_date: str) -> QuantScreenResult:
         """Evaluate instrument technicals deterministically in milliseconds."""
         try:
@@ -118,6 +147,24 @@ class QuantScreener:
             sma50 = float(stock_df["close_50_sma"].iloc[-1])
             sma200 = float(stock_df["close_200_sma"].iloc[-1]) if "close_200_sma" in stock_df else sma50
 
+            # RVOL (Relative Volume vs 20-period moving average)
+            rvol = 1.0
+            if "volume" in stock_df and len(stock_df["volume"]) >= 20:
+                try:
+                    vol_series = stock_df["volume"]
+                    curr_vol = float(vol_series.iloc[-1])
+                    avg_vol = float(vol_series.iloc[-20:].mean())
+                    if avg_vol > 0:
+                        rvol = round(curr_vol / avg_vol, 2)
+                except Exception:
+                    pass
+
+            # Detect Statistical Divergences (RSI vs Price)
+            div_type, div_desc = self._detect_divergence(
+                stock_df["close"].tolist(),
+                stock_df["rsi"].tolist()
+            )
+
             metrics = {
                 "close": close,
                 "rsi": rsi,
@@ -129,6 +176,8 @@ class QuantScreener:
                 "ema10": ema10,
                 "sma50": sma50,
                 "sma200": sma200,
+                "rvol": rvol,
+                "divergence": div_type or "NONE",
             }
 
             # Channel percentile: 0.0 = lower band, 1.0 = upper band
@@ -186,6 +235,31 @@ class QuantScreener:
                 bear_points += 15
                 bear_reasons.append("Precio bajo SMA-50 (resistencia bajista)")
 
+            # 5. Statistical Divergence Booster (Win Rate Multiplier)
+            if div_type == "BULLISH":
+                bull_points += 35
+                bull_reasons.append(div_desc)
+            elif div_type == "BEARISH":
+                bear_points += 35
+                bear_reasons.append(div_desc)
+
+            # 6. Relative Volume (RVOL) Institutional Confirmation
+            if rvol >= 1.25:
+                if bull_points > bear_points:
+                    bull_points += 15
+                    bull_reasons.append(f"Volumen institucional confirmativo (RVOL: {rvol:.2f}x)")
+                elif bear_points > bull_points:
+                    bear_points += 15
+                    bear_reasons.append(f"Volumen vendedor elevado (RVOL: {rvol:.2f}x)")
+            elif rvol < 0.60:
+                # Penalize low volume breakouts/breakdowns
+                if bull_points > bear_points:
+                    bull_points = max(0, bull_points - 10)
+                    bull_reasons.append(f"Aviso: Volumen reducido (RVOL: {rvol:.2f}x)")
+                elif bear_points > bull_points:
+                    bear_points = max(0, bear_points - 10)
+                    bear_reasons.append(f"Aviso: Volumen reducido (RVOL: {rvol:.2f}x)")
+
             # Determine setup and actionable conviction
             is_actionable = False
             bias = "NEUTRAL"
@@ -193,7 +267,7 @@ class QuantScreener:
             setup_name = "Consolidación Neutral"
             rationale = "Mercado sin desequilibrio de oferta/demanda claro; capital preservado."
 
-            # 5. Macro BTC Regime Gatekeeper for Altcoins
+            # 7. Macro BTC Regime Gatekeeper for Altcoins
             is_altcoin = symbol not in ("BTC-USD", "BTCUSD", "BTC/USD") and ("-USD" in symbol or "USD" in symbol)
             if is_altcoin and bull_points > bear_points:
                 btc_macro = self.get_btc_macro_health(as_of_date)
@@ -224,14 +298,20 @@ class QuantScreener:
             if bull_points >= self.conviction_threshold and bull_points > bear_points:
                 is_actionable = True
                 bias = "BUY"
-                setup_name = f"Oportunidad Alcista ({regime.regime_display})"
+                if div_type == "BULLISH":
+                    setup_name = f"Divergencia Alcista (Alta Probabilidad - {regime.regime_display})"
+                else:
+                    setup_name = f"Oportunidad Alcista ({regime.regime_display})"
                 rationale = " + ".join(bull_reasons)
                 stop_loss = round(close - (atr * sl_mult), 2)
                 take_profit = round(close + (atr * tp_mult), 2)
             elif bear_points >= self.conviction_threshold and bear_points > bull_points:
                 is_actionable = True
                 bias = "SELL"
-                setup_name = f"Reversión Bajista ({regime.regime_display})"
+                if div_type == "BEARISH":
+                    setup_name = f"Divergencia Bajista (Reversión - {regime.regime_display})"
+                else:
+                    setup_name = f"Reversión Bajista ({regime.regime_display})"
                 rationale = " + ".join(bear_reasons)
                 stop_loss = round(close + (atr * sl_mult), 2)
                 take_profit = round(close - (atr * tp_mult), 2)
