@@ -14,6 +14,7 @@ from bot.models import (
 from bot.risk.risk_engine import RiskEngine
 from bot.config import BotRiskConfig
 from bot.brokers.paper import PaperBroker
+from bot.learning.pattern_memory import PatternMemory
 
 
 class TestRiskEngine:
@@ -25,7 +26,7 @@ class TestRiskEngine:
             default_stop_loss_pct=4.0,
             max_stop_loss_pct=7.0,
         )
-        self.engine = RiskEngine(self.config)
+        self.engine = RiskEngine(self.config, pattern_memory=PatternMemory(db_path=":memory:"))
 
     def test_buy_approval_and_position_sizing(self):
         balance = AccountBalance(
@@ -684,6 +685,114 @@ class TestLeanAndFreqtradeProtections:
         # 4. Cleanup on trade exit
         engine.register_trade_exit("SOL-USD", is_loss=False)
         assert "SOLUSD" not in engine._position_targets
+
+    def test_minimum_cash_reserve_floor(self):
+        """Ensure RiskEngine never spends cash below the institutional minimum reserve floor."""
+        config = BotRiskConfig(min_cash_reserve_pct=25.0, max_position_size_pct=10.0)
+        engine = RiskEngine(config, pattern_memory=PatternMemory(db_path=":memory:"))
+
+        # Equity = $100k, min cash reserve = $25k. Cash = $24k -> strictly rejected
+        bal_low_cash = AccountBalance(cash=24_000.0, equity=100_000.0, buying_power=24_000.0, initial_day_equity=100_000.0)
+        signal = TradeSignal(
+            symbol="BTC-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.85,
+            current_price=60_000.0,
+            stop_loss=58_000.0,
+            metrics={"rsi": 50.0, "ema_ratio": 1.01, "atr": 1000.0},
+        )
+        res_reject = engine.evaluate(signal, bal_low_cash, positions=[])
+        assert res_reject.is_approved is False
+        assert any("Piso de Liquidez / Reserva de Efectivo activa" in r for r in res_reject.rejection_reasons)
+
+        # Cash = $30k -> Available cash above floor is $5k. Sizing is capped to $5k, preserving the $25k floor!
+        bal_ok_cash = AccountBalance(cash=30_000.0, equity=100_000.0, buying_power=30_000.0, initial_day_equity=100_000.0)
+        res_ok = engine.evaluate(signal, bal_ok_cash, positions=[])
+        assert res_ok.is_approved is True
+        assert res_ok.allocated_capital <= 5_000.0
+
+    def test_aggregate_crypto_exposure_cap(self):
+        """Ensure total crypto holdings cannot exceed max_total_crypto_allocation_pct."""
+        config = BotRiskConfig(max_total_crypto_allocation_pct=30.0, max_position_size_pct=12.0)
+        engine = RiskEngine(config, pattern_memory=PatternMemory(db_path=":memory:"))
+        bal = AccountBalance(cash=80_000.0, equity=100_000.0, buying_power=80_000.0, initial_day_equity=100_000.0)
+
+        # Existing crypto positions: BTC ($15k) + ETH ($15k) = $30k (already at 30% cap)
+        existing_crypto = [
+            Position(symbol="BTCUSD", asset_class=AssetClass.CRYPTO, quantity=0.25, entry_price=60_000.0, current_price=60_000.0),
+            Position(symbol="ETHUSD", asset_class=AssetClass.CRYPTO, quantity=6.0, entry_price=2500.0, current_price=2500.0),
+        ]
+        sol_signal = TradeSignal(
+            symbol="SOL-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.85,
+            current_price=100.0,
+            stop_loss=97.0,
+            metrics={"rsi": 50.0, "ema_ratio": 1.01, "atr": 2.0},
+        )
+        res = engine.evaluate(sol_signal, bal, positions=existing_crypto)
+        assert res.is_approved is False
+        assert any("Techo de Exposición Agregada Cripto alcanzado" in r for r in res.rejection_reasons)
+
+    def test_portfolio_trailing_drawdown_guard(self):
+        """Ensure gains from an intraday peak equity high-water mark are locked against deep drawdowns."""
+        config = BotRiskConfig(enable_portfolio_trailing_drawdown_guard=True, max_trailing_drawdown_from_peak_pct=2.5)
+        engine = RiskEngine(config, pattern_memory=PatternMemory(db_path=":memory:"))
+
+        # 1. Account sets peak at $105,000
+        bal_peak = AccountBalance(cash=50_000.0, equity=105_000.0, buying_power=50_000.0, initial_day_equity=100_000.0)
+        signal = TradeSignal(
+            symbol="AAPL",
+            asset_class=AssetClass.EQUITY,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.85,
+            current_price=200.0,
+            stop_loss=194.0,
+        )
+        res_peak = engine.evaluate(signal, bal_peak, positions=[])
+        assert res_peak.is_approved is True
+        assert engine._peak_equity == 105_000.0
+
+        # 2. Equity drops from $105,000 to $102,000 (drawdown of 2.85% from peak > 2.5% max)
+        bal_dd = AccountBalance(cash=50_000.0, equity=102_000.0, buying_power=50_000.0, initial_day_equity=100_000.0)
+        res_dd = engine.evaluate(signal, bal_dd, positions=[])
+        assert res_dd.is_approved is False
+        assert any("Portfolio Peak Drawdown Guard activo" in r for r in res_dd.rejection_reasons)
+
+    def test_in_flight_orders_prevent_duplicate_pyramiding(self):
+        """Ensure back-to-back rapid signals do not exceed position allocation limit while orders are in-flight."""
+        config = BotRiskConfig(max_position_size_pct=10.0)
+        engine = RiskEngine(config, pattern_memory=PatternMemory(db_path=":memory:"))
+        bal = AccountBalance(cash=100_000.0, equity=100_000.0, buying_power=100_000.0, initial_day_equity=100_000.0)
+
+        # Register in-flight buy order of $9,800 for ETH-USD
+        engine.register_order_in_flight("ETH-USD", quantity=4.083, price=2400.0, asset_class=AssetClass.CRYPTO)
+        assert engine.get_in_flight_capital("ETH-USD") > 9000.0
+
+        # Attempt immediate second buy on ETH-USD before broker positions reflect the fill
+        signal = TradeSignal(
+            symbol="ETH-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.85,
+            current_price=2400.0,
+            stop_loss=2340.0,
+            metrics={"rsi": 50.0, "ema_ratio": 1.01, "atr": 40.0},
+        )
+        # Positions is empty because broker fill has not yet indexed
+        res_dup = engine.evaluate(signal, bal, positions=[])
+        assert res_dup.is_approved is False
+        assert any("allocation limit reached" in r or "ya completada" in r for r in res_dup.rejection_reasons)
 
 
 

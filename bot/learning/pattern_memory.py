@@ -26,10 +26,17 @@ class PatternMemory:
 
     def __init__(self, db_path: str = "data/pattern_memory.db"):
         self.db_path = db_path
-        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._mem_conn: sqlite3.Connection | None = None
+        if self.db_path != ":memory:":
+            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _get_connection(self) -> sqlite3.Connection:
+        if self.db_path == ":memory:":
+            if self._mem_conn is None:
+                self._mem_conn = sqlite3.connect(":memory:")
+                self._mem_conn.row_factory = sqlite3.Row
+            return self._mem_conn
         conn = sqlite3.connect(self.db_path, timeout=10.0)
         conn.execute("PRAGMA busy_timeout=5000")
         conn.row_factory = sqlite3.Row

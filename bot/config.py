@@ -46,6 +46,14 @@ class BotRiskConfig(BaseModel):
     max_concentration_threshold_pct: float = Field(default=20.0, description="Concentration cap where position trim/harvest is recommended")
     target_concentration_pct: float = Field(default=12.0, description="Target concentration after rebalancing trim")
 
+    # Capital Liquidity & Minimum Cash Reserve Floor
+    min_cash_reserve_pct: float = Field(default=20.0, description="Minimum percentage of portfolio kept in unencumbered cash (e.g. 20%)")
+    # Portfolio Aggregate Crypto Exposure Limit (Systemic Risk Control)
+    max_total_crypto_allocation_pct: float = Field(default=30.0, description="Max total portfolio allocation across all crypto assets combined (30%)")
+    # Portfolio-Level High-Water Mark Trailing Drawdown Protection (Peak Profit Lock)
+    enable_portfolio_trailing_drawdown_guard: bool = Field(default=True, description="Enable portfolio peak high-water mark trailing drawdown guard")
+    max_trailing_drawdown_from_peak_pct: float = Field(default=2.5, description="Max drawdown permitted from intraday peak equity (2.5%)")
+
 
 class BotConfig(BaseModel):
     """Global Bot Configuration."""

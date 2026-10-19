@@ -33,6 +33,39 @@ class RiskEngine:
         self._position_targets: dict[str, dict[str, float]] = {}
         # Entry context tracking (RSI, EMA, ATR, Regime) for post-mortem learning
         self.entry_contexts: dict[str, dict[str, Any]] = {}
+        # Portfolio-level Peak Equity High-Water Mark tracker
+        self._peak_equity: float = 0.0
+        # In-flight orders tracker: symbol -> list of dicts (timestamp, qty, cost, asset_class)
+        self._in_flight_orders: dict[str, list[dict[str, Any]]] = {}
+
+    def register_order_in_flight(self, symbol: str, quantity: float, price: float, asset_class: AssetClass) -> None:
+        """Track newly submitted order in-flight to prevent duplicate rapid pyramiding."""
+        norm_sym = normalize_symbol(symbol)
+        now = time.time()
+        if norm_sym not in self._in_flight_orders:
+            self._in_flight_orders[norm_sym] = []
+        self._in_flight_orders[norm_sym].append({
+            "timestamp": now,
+            "quantity": quantity,
+            "cost": quantity * price,
+            "asset_class": asset_class,
+        })
+
+    def get_in_flight_capital(self, symbol: str | None = None, asset_class: AssetClass | None = None) -> float:
+        """Return total in-flight capital for a symbol or asset class (pruning orders older than 180s)."""
+        now = time.time()
+        total = 0.0
+        norm_target = normalize_symbol(symbol) if symbol else None
+        for sym, orders in list(self._in_flight_orders.items()):
+            active = [o for o in orders if now - o["timestamp"] < 180.0]
+            self._in_flight_orders[sym] = active
+            for o in active:
+                if norm_target and sym != norm_target:
+                    continue
+                if asset_class and o.get("asset_class") != asset_class:
+                    continue
+                total += o.get("cost", 0.0)
+        return total
 
     def register_entry_context(self, symbol: str, context: dict[str, Any]) -> None:
         """Register technical metrics at entry for post-trade feedback and learning."""
@@ -286,7 +319,34 @@ class RiskEngine:
                 rejection_reasons=["Trade signal action is HOLD; no execution required."],
             )
 
-        # 2. Kill-Switch check (daily drawdown) - Blocks new BUYs, but permits protective SELLs
+        # 2. Peak Equity Tracking & High-Water Mark Trailing Drawdown Protection
+        if balance.equity > self._peak_equity:
+            self._peak_equity = balance.equity
+
+        if getattr(self.config, "enable_portfolio_trailing_drawdown_guard", True) and self._peak_equity > 0:
+            trailing_dd_pct = ((self._peak_equity - balance.equity) / self._peak_equity) * 100.0
+            max_dd_peak = getattr(self.config, "max_trailing_drawdown_from_peak_pct", 2.5)
+            if trailing_dd_pct >= max_dd_peak and signal.action == OrderSide.BUY:
+                rejection_reasons.append(
+                    f"Portfolio Peak Drawdown Guard activo: retroceso del {trailing_dd_pct:.2f}% "
+                    f"desde el pico histórico (${self._peak_equity:,.2f} -> ${balance.equity:,.2f}, máx permitido: {max_dd_peak:.1f}%). "
+                    f"Compras bloqueadas para blindar beneficios acumulados."
+                )
+                return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+
+        # 2b. Minimum Cash Reserve Floor (Capital Liquidity Protection)
+        min_cash_pct = getattr(self.config, "min_cash_reserve_pct", 20.0)
+        min_cash_reserve = balance.equity * (min_cash_pct / 100.0)
+        available_cash_reserve = max(0.0, balance.cash - min_cash_reserve)
+        if signal.action == OrderSide.BUY and balance.cash <= min_cash_reserve:
+            rejection_reasons.append(
+                f"Piso de Liquidez / Reserva de Efectivo activa: Efectivo actual (${balance.cash:,.2f}) "
+                f"en o bajo la reserva mínima institucional ({min_cash_pct:.0f}% = ${min_cash_reserve:,.2f}). "
+                f"Compras suspendidas para mantener solvencia y capital de maniobra."
+            )
+            return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+
+        # 2c. Kill-Switch check (daily drawdown) - Blocks new BUYs, but permits protective SELLs
         if balance.daily_drawdown_pct >= self.config.max_daily_drawdown_pct and signal.action == OrderSide.BUY:
             rejection_reasons.append(
                 f"Kill-switch active: daily drawdown ({balance.daily_drawdown_pct:.2f}%) "
@@ -352,7 +412,7 @@ class RiskEngine:
             )
             return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
 
-        # 8. Correlated Crypto Exposure Gatekeeper (Max concurrent crypto positions)
+        # 8. Correlated Crypto Exposure Gatekeeper (Max concurrent crypto positions & Aggregate Cap)
         if signal.action == OrderSide.BUY and signal.asset_class == AssetClass.CRYPTO:
             max_crypto_pos = getattr(self.config, "max_concurrent_crypto_positions", 4)
             crypto_positions_count = sum(1 for p in positions if p.asset_class == AssetClass.CRYPTO and p.quantity > 0)
@@ -361,6 +421,23 @@ class RiskEngine:
                 rejection_reasons.append(
                     f"Límite de correlación cripto alcanzado: {crypto_positions_count} activos en cartera "
                     f"(máx: {max_crypto_pos}). Capital preservado contra riesgo sistémico de mercado."
+                )
+                return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+
+            # Hard Aggregate Crypto Exposure Cap (e.g. max 30% of portfolio in crypto)
+            max_crypto_cap_pct = getattr(self.config, "max_total_crypto_allocation_pct", 30.0)
+            max_crypto_dollars = balance.equity * (max_crypto_cap_pct / 100.0)
+            current_crypto_val = sum(
+                p.market_value for p in positions if p.asset_class == AssetClass.CRYPTO and p.quantity > 0
+            )
+            in_flight_crypto_val = self.get_in_flight_capital(asset_class=AssetClass.CRYPTO)
+            total_active_crypto = current_crypto_val + in_flight_crypto_val
+
+            if total_active_crypto >= max_crypto_dollars:
+                rejection_reasons.append(
+                    f"Techo de Exposición Agregada Cripto alcanzado: ${total_active_crypto:,.2f} en cripto "
+                    f"({(total_active_crypto / balance.equity) * 100.0:.1f}% >= {max_crypto_cap_pct:.1f}% máx de ${max_crypto_dollars:,.2f}). "
+                    f"Portafolio protegido contra sobre-concentración y volatilidad sistémica."
                 )
                 return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
 
@@ -453,12 +530,15 @@ class RiskEngine:
         alloc_scale = 0.4 + 0.6 * ((conviction - 0.5) / 0.5)
         max_capital_allocation = balance.equity * ((self.config.max_position_size_pct * alloc_scale) / 100.0)
         
-        # Deduct already invested capital in this asset if any
+        # Deduct already invested capital in this asset + in-flight pending orders
         existing_val = existing_position.market_value if existing_position else 0.0
-        if existing_val >= max_capital_allocation:
+        in_flight_sym_val = self.get_in_flight_capital(symbol=signal.symbol)
+        total_sym_exposure = existing_val + in_flight_sym_val
+
+        if total_sym_exposure >= max_capital_allocation:
             rejection_reasons.append(
                 f"Position allocation limit reached for {signal.symbol}: "
-                f"currently holding ${existing_val:,.2f} (max permitted: ${max_capital_allocation:,.2f}). "
+                f"currently holding/pending ${total_sym_exposure:,.2f} (max permitted: ${max_capital_allocation:,.2f}). "
                 f"Capital preserved against over-concentration."
             )
             return RiskValidationResult(
@@ -467,10 +547,22 @@ class RiskEngine:
                 risk_warnings=warnings,
             )
 
-        remaining_alloc = max(0.0, max_capital_allocation - existing_val)
-        if existing_val > 0 and remaining_alloc < 50.0:
+        remaining_alloc = max(0.0, max_capital_allocation - total_sym_exposure)
+
+        # For crypto, further constrain remaining allocation by available room under aggregate crypto cap
+        if signal.asset_class == AssetClass.CRYPTO:
+            max_crypto_cap_pct = getattr(self.config, "max_total_crypto_allocation_pct", 30.0)
+            max_crypto_dollars = balance.equity * (max_crypto_cap_pct / 100.0)
+            current_crypto_val = sum(
+                p.market_value for p in positions if p.asset_class == AssetClass.CRYPTO and p.quantity > 0
+            )
+            in_flight_crypto_val = self.get_in_flight_capital(asset_class=AssetClass.CRYPTO)
+            remaining_crypto_room = max(0.0, max_crypto_dollars - (current_crypto_val + in_flight_crypto_val))
+            remaining_alloc = min(remaining_alloc, remaining_crypto_room)
+
+        if total_sym_exposure > 0 and remaining_alloc < 50.0:
             rejection_reasons.append(
-                f"Posición para {signal.symbol} ya completada (${existing_val:,.2f} de ${max_capital_allocation:,.2f} máx). "
+                f"Posición para {signal.symbol} ya completada (${total_sym_exposure:,.2f} de ${max_capital_allocation:,.2f} máx). "
                 f"Capital preservado contra sobre-exposición."
             )
             return RiskValidationResult(
@@ -481,8 +573,8 @@ class RiskEngine:
 
         qty_by_alloc = remaining_alloc / current_price
 
-        # c) Available liquidity (Bounded by Buying Power for equities to avoid broker rejection)
-        available_liquidity = balance.cash
+        # c) Available liquidity (Bounded by Cash Reserve Floor and Buying Power)
+        available_liquidity = available_cash_reserve
         if signal.asset_class == AssetClass.EQUITY and balance.buying_power > 0:
             available_liquidity = min(available_liquidity, balance.buying_power)
         # Apply 2% safety buffer for slippage & fees

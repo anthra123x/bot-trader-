@@ -180,14 +180,17 @@ class BotRunner:
         )
 
         executed_order = self.broker.submit_order(order)
-        if action == OrderSide.BUY and hasattr(self.risk_engine, "register_entry_context"):
-            self.risk_engine.register_entry_context(symbol, {
-                "rsi": float(signal.metrics.get("rsi", 50.0)),
-                "ema_ratio": float(signal.metrics.get("ema_ratio", 1.0)),
-                "atr": float(signal.metrics.get("atr", current_price * 0.02)),
-                "confidence": signal.confidence,
-                "regime": current_regime_name,
-            })
+        if action == OrderSide.BUY:
+            if hasattr(self.risk_engine, "register_entry_context"):
+                self.risk_engine.register_entry_context(symbol, {
+                    "rsi": float(signal.metrics.get("rsi", 50.0)),
+                    "ema_ratio": float(signal.metrics.get("ema_ratio", 1.0)),
+                    "atr": float(signal.metrics.get("atr", current_price * 0.02)),
+                    "confidence": signal.confidence,
+                    "regime": current_regime_name,
+                })
+            if hasattr(self.risk_engine, "register_order_in_flight"):
+                self.risk_engine.register_order_in_flight(symbol, risk_result.adjusted_quantity, current_price, asset_class)
         logger.info("[ORDER_FILLED] 🚀 ¡Orden ejecutada en Alpaca para %s! %s %s u @ $%.2f", symbol, action.value, risk_result.adjusted_quantity, current_price)
         self.notifier.notify_order_execution(executed_order)
         try:
@@ -336,7 +339,8 @@ class BotRunner:
             logger.debug("Could not construct EnhancedPortfolioContext for graph: %s", pe)
 
         try:
-            final_state, rating = graph.propagate(symbol, date, asset_type=asset_type, portfolio=portfolio_ctx)
+            active_graph = self.crypto_graph if is_crypto else self.equity_graph
+            final_state, rating = active_graph.propagate(symbol, date, asset_type=asset_type, portfolio=portfolio_ctx)
         except Exception as err:
             logger.warning(
                 "[QUANT_FAILOVER] ⚡ LLM comité no disponible o cuota agotada (%s). Activando ejecución algorítmica cuantitativa directa (Bias: %s, R:R %.2f)",

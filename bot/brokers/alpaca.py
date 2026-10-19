@@ -309,6 +309,9 @@ class AlpacaBroker(BaseBroker):
                 data = resp.json()
                 order.order_id = data["id"]
                 order.status = OrderStatus.PENDING
+                with self._lock:
+                    self._positions_cache = None
+                    self._balance_cache = None
                 return order
             else:
                 order.status = OrderStatus.REJECTED
@@ -333,6 +336,9 @@ class AlpacaBroker(BaseBroker):
                 res = self._run_cli(cli_args)
                 order.order_id = str(res.get("id", ""))
                 order.status = OrderStatus.PENDING
+                with self._lock:
+                    self._positions_cache = None
+                    self._balance_cache = None
                 return order
             except Exception as e:
                 order.status = OrderStatus.REJECTED
@@ -340,6 +346,9 @@ class AlpacaBroker(BaseBroker):
                 return order
 
     def cancel_order(self, order_id: str) -> bool:
+        with self._lock:
+            self._positions_cache = None
+            self._balance_cache = None
         if self._has_direct_keys():
             url = f"{self.base_url}/v2/orders/{order_id}"
             resp = requests.delete(url, headers=self._headers(), timeout=10)
