@@ -2,7 +2,7 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <title>TradingAgents OS | Monitor Autónomo Cuantitativo</title>
   <meta name="description" content="Terminal ejecutiva y monitor cuantitativo en tiempo real para TradingAgents con Alpaca y Render.">
   <link rel="stylesheet" href="/static/css/style.css?v=8.0">
@@ -166,7 +166,7 @@
           </div>
 
           <!-- Executed Orders History View -->
-          <div class="mobile-view-pane active" id="view-orders">
+          <div class="mobile-view-pane" id="view-orders">
             <div class="card-panel">
               <div class="card-header">
                 <div class="card-title-group">
@@ -201,7 +201,7 @@
         </div>
 
         <!-- Right Side Column (Autonomous Intelligence & Activity Feed) -->
-        <div class="workspace-sidebar mobile-view-pane active" id="view-agents">
+        <div class="workspace-sidebar mobile-view-pane" id="view-agents">
           <!-- Monitored Universe Micro-Card -->
           <div class="card-panel">
             <div class="card-header">
@@ -316,15 +316,19 @@
   <!-- Barra de Navegación Móvil Inferior -->
   <nav class="mobile-bottom-nav">
     <button class="mobile-nav-btn active" id="mob-nav-portfolio" onclick="switchMobileView('portfolio')">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
       <span class="nav-label">Portafolio</span>
     </button>
     <button class="mobile-nav-btn" id="mob-nav-orders" onclick="switchMobileView('orders')">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/></svg>
       <span class="nav-label">Órdenes</span>
     </button>
     <button class="mobile-nav-btn" id="mob-nav-agents" onclick="switchMobileView('agents')">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
       <span class="nav-label">Agentes</span>
     </button>
     <button class="mobile-nav-btn" id="mob-nav-alerts" onclick="toggleNotificationsModal()">
+      <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
       <span class="nav-label">Alertas</span>
       <span class="nav-badge-pill" id="mobile-badge-count">0</span>
     </button>

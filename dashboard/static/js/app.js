@@ -135,7 +135,7 @@ async function loadEquityHistory() {
     if (history && history.length > 0 && equityChartInstance) {
       equityChartInstance.data.labels = history.map(h => {
         const d = new Date(h.recorded_at);
-        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
       });
       equityChartInstance.data.datasets[0].data = history.map(h => h.equity);
       equityChartInstance.update('none');
@@ -150,7 +150,7 @@ function initEquityChart() {
   const canvas = document.getElementById('equityChart');
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
-  const gradient = ctx.createLinearGradient(0, 0, 0, 240);
+  const gradient = ctx.createLinearGradient(0, 0, 0, 200);
   gradient.addColorStop(0, 'rgba(255, 255, 255, 0.08)');
   gradient.addColorStop(1, 'rgba(255, 255, 255, 0.00)');
 
@@ -162,15 +162,15 @@ function initEquityChart() {
         label: 'Equity ($ USD)',
         data: [],
         borderColor: '#e4e4e7',
-        borderWidth: 2,
+        borderWidth: 1.8,
         backgroundColor: gradient,
         fill: true,
         tension: 0.25,
-        pointRadius: 3,
-        pointHoverRadius: 5,
+        pointRadius: 2.5,
+        pointHoverRadius: 4,
         pointBackgroundColor: '#ffffff',
         pointBorderColor: '#0c0c0e',
-        pointBorderWidth: 1.5,
+        pointBorderWidth: 1,
       }]
     },
     options: {
@@ -196,14 +196,21 @@ function initEquityChart() {
       scales: {
         x: {
           grid: { color: 'rgba(255, 255, 255, 0.02)' },
-          ticks: { color: '#71717a', font: { family: 'JetBrains Mono', size: 10 } }
+          ticks: {
+            color: '#71717a',
+            font: { family: 'JetBrains Mono', size: 9 },
+            maxTicksLimit: 5,
+            maxRotation: 0,
+            autoSkip: true,
+          }
         },
         y: {
           grid: { color: 'rgba(255, 255, 255, 0.03)' },
           ticks: {
             color: '#71717a',
-            font: { family: 'JetBrains Mono', size: 10 },
-            callback: (v) => `$${v.toLocaleString()}`
+            font: { family: 'JetBrains Mono', size: 9 },
+            maxTicksLimit: 4,
+            callback: (v) => `$${v.toLocaleString('en-US', { maximumFractionDigits: 0 })}`
           }
         }
       }
@@ -264,7 +271,8 @@ async function fetchTelemetryData() {
     }
 
     // Update Chart with live point
-    const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const _now = new Date();
+    const nowTime = `${String(_now.getHours()).padStart(2, '0')}:${String(_now.getMinutes()).padStart(2, '0')}`;
     if (equityChartInstance) {
       if (equityChartInstance.data.labels.length === 0) {
         equityChartInstance.data.labels.push(nowTime);
@@ -540,4 +548,6 @@ function switchMobileView(view) {
 
   const pane = document.getElementById(`view-${view}`);
   if (pane) pane.classList.add('active');
+
+  window.scrollTo({ top: 0, behavior: 'smooth' });
 }
