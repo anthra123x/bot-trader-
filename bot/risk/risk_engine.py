@@ -1,6 +1,7 @@
 import logging
 import math
 import time
+from typing import Any
 from bot.config import BotRiskConfig
 from bot.learning.pattern_memory import PatternMemory
 from bot.models import AccountBalance, AssetClass, OrderSide, Position, RiskValidationResult, TradeSignal
@@ -30,6 +31,19 @@ class RiskEngine:
         self._partial_tp_stages: dict[str, int] = {}
         # Persistent position targets tracker (Take-Profit & Stop-Loss)
         self._position_targets: dict[str, dict[str, float]] = {}
+        # Entry context tracking (RSI, EMA, ATR, Regime) for post-mortem learning
+        self.entry_contexts: dict[str, dict[str, Any]] = {}
+
+    def register_entry_context(self, symbol: str, context: dict[str, Any]) -> None:
+        """Register technical metrics at entry for post-trade feedback and learning."""
+        norm_sym = normalize_symbol(symbol)
+        self.entry_contexts[norm_sym] = context
+        self.entry_contexts[symbol] = context
+
+    def get_entry_context(self, symbol: str) -> dict[str, Any]:
+        """Retrieve technical metrics captured when position was entered."""
+        norm_sym = normalize_symbol(symbol)
+        return self.entry_contexts.get(norm_sym) or self.entry_contexts.get(symbol) or {}
 
     def register_position_targets(self, symbol: str, entry_price: float, stop_loss: float, take_profit: float | None) -> None:
         """Register active target take-profit and stop-loss levels for a position."""
@@ -83,6 +97,8 @@ class RiskEngine:
         self._partial_tp_stages.pop(symbol, None)
         self._position_targets.pop(norm_sym, None)
         self._position_targets.pop(symbol, None)
+        self.entry_contexts.pop(norm_sym, None)
+        self.entry_contexts.pop(symbol, None)
         if is_loss:
             self._symbol_cooldowns[norm_sym] = now
             self._recent_stoploss_events.append(now)

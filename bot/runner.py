@@ -130,12 +130,20 @@ class BotRunner:
             symbol, rating, action.value if action else "HOLD", current_price
         )
 
-        # Quality Gate Check: High-Conviction Institutional Filter
-        min_conf = getattr(self.config.risk, "min_signal_confidence", 0.0) or 0.68
+        # Quality Gate Check: Adaptive High-Conviction Institutional Filter
+        base_min_conf = getattr(self.config.risk, "min_signal_confidence", 0.0) or 0.68
+        from bot.risk.regime_specialist import REGIME_SPECIALIST
+        current_regime_obj = REGIME_SPECIALIST.analyze_market_regime(symbol.replace("/", "-"))
+        current_regime_name = current_regime_obj.regime.value
+        if "HIGH_VOLATILITY" in current_regime_name or "BEAR" in current_regime_name:
+            min_conf = max(base_min_conf, 0.75)
+        else:
+            min_conf = base_min_conf
+
         if signal.action == OrderSide.BUY and signal.confidence < min_conf:
             logger.info(
-                "[QUALITY_GATE] 🛡️ %s: Convicción (%.0f%%) inferior al umbral mínimo institucional (%.0f%%). Entrada pausada para maximizar Win Rate (0 capital arriesgado).",
-                symbol, signal.confidence * 100.0, min_conf * 100.0
+                "[QUALITY_GATE] 🛡️ %s: Convicción (%.0f%%) inferior al umbral adaptativo (%.0f%% para %s). Entrada pausada para maximizar Win Rate (0 capital arriesgado).",
+                symbol, signal.confidence * 100.0, min_conf * 100.0, current_regime_name
             )
             return None
 
@@ -162,6 +170,14 @@ class BotRunner:
         )
 
         executed_order = self.broker.submit_order(order)
+        if action == OrderSide.BUY and hasattr(self.risk_engine, "register_entry_context"):
+            self.risk_engine.register_entry_context(symbol, {
+                "rsi": float(signal.metrics.get("rsi", 50.0)),
+                "ema_ratio": float(signal.metrics.get("ema_ratio", 1.0)),
+                "atr": float(signal.metrics.get("atr", current_price * 0.02)),
+                "confidence": signal.confidence,
+                "regime": current_regime_name,
+            })
         logger.info("[ORDER_FILLED] 🚀 ¡Orden ejecutada en Alpaca para %s! %s %s u @ $%.2f", symbol, action.value, risk_result.adjusted_quantity, current_price)
         self.notifier.notify_order_execution(executed_order)
         try:
@@ -409,7 +425,14 @@ class BotRunner:
                     try:
                         from bot.models import TradeOutcome
                         from bot.risk.regime_specialist import REGIME_SPECIALIST
-                        regime_name = REGIME_SPECIALIST.analyze_market_regime(p.symbol.replace("/", "-")).regime.value
+                        norm_sym = p.symbol.replace("/", "-")
+                        regime_name = REGIME_SPECIALIST.analyze_market_regime(norm_sym).regime.value
+                        entry_ctx = self.risk_engine.get_entry_context(p.symbol) if hasattr(self.risk_engine, "get_entry_context") else {}
+                        rsi_entry = float(entry_ctx.get("rsi", 50.0))
+                        ema_ratio = float(entry_ctx.get("ema_ratio", 1.0))
+                        atr_val = float(entry_ctx.get("atr", p.entry_price * 0.02))
+                        atr_pct = (atr_val / p.entry_price * 100.0) if p.entry_price > 0 else 2.0
+
                         outcome = TradeOutcome(
                             trade_id=executed_partial.order_id or str(uuid.uuid4())[:8],
                             symbol=p.symbol,
@@ -421,6 +444,9 @@ class BotRunner:
                             pnl_dollars=partial_pnl_dollars,
                             pnl_pct=partial_pnl_pct,
                             outcome="WIN",
+                            rsi_entry=rsi_entry,
+                            ema_ratio=ema_ratio,
+                            volatility_atr_pct=atr_pct,
                             market_regime=regime_name,
                         )
                         self.risk_engine.pattern_memory.record_trade_outcome(outcome)
@@ -529,15 +555,21 @@ class BotRunner:
                     status=OrderStatus.PENDING,
                 )
                 executed = self.broker.submit_order(sell_order)
-                self.risk_engine.register_trade_exit(p.symbol, is_loss=is_loss)
 
                 # Continuous Learning Feedback Loop: Register trade outcome into PatternMemory
                 if hasattr(self.risk_engine, "pattern_memory") and self.risk_engine.pattern_memory:
                     try:
                         from bot.models import TradeOutcome
                         from bot.risk.regime_specialist import REGIME_SPECIALIST
-                        regime_name = REGIME_SPECIALIST.analyze_market_regime("BTC-USD").regime.value
+                        norm_sym = p.symbol.replace("/", "-")
+                        regime_name = REGIME_SPECIALIST.analyze_market_regime(norm_sym).regime.value
                         
+                        entry_ctx = self.risk_engine.get_entry_context(p.symbol) if hasattr(self.risk_engine, "get_entry_context") else {}
+                        rsi_entry = float(entry_ctx.get("rsi", 50.0))
+                        ema_ratio = float(entry_ctx.get("ema_ratio", 1.0))
+                        atr_val = float(entry_ctx.get("atr", p.entry_price * 0.02))
+                        atr_pct = (atr_val / p.entry_price * 100.0) if p.entry_price > 0 else 2.0
+
                         outcome = TradeOutcome(
                             trade_id=executed.order_id or str(uuid.uuid4())[:8],
                             symbol=p.symbol,
@@ -549,11 +581,16 @@ class BotRunner:
                             pnl_dollars=pnl_dollars,
                             pnl_pct=pnl_pct,
                             outcome="WIN" if not is_loss else "LOSS",
+                            rsi_entry=rsi_entry,
+                            ema_ratio=ema_ratio,
+                            volatility_atr_pct=atr_pct,
                             market_regime=regime_name,
                         )
                         self.risk_engine.pattern_memory.record_trade_outcome(outcome)
                     except Exception as pe:
                         logger.debug("Failed to record trade outcome in pattern memory: %s", pe)
+
+                self.risk_engine.register_trade_exit(p.symbol, is_loss=is_loss)
 
                 self.notifier.notify_order_execution(executed)
                 try:

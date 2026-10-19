@@ -191,22 +191,55 @@ class PatternMemory:
         Returns PatternCheckResult with veto (multiplier=0.0) or sizing penalty (multiplier=0.5)
         if the setup matches a previously failed pattern above threshold similarity.
         """
-        with self._get_connection() as conn:
-            rows = conn.execute("""
-                SELECT mistake_signature, lesson_learned, rsi_entry, ema_ratio, volatility_atr_pct, pnl_pct
-                FROM trade_patterns
-                WHERE outcome = 'LOSS'
-                ORDER BY created_at DESC
-                LIMIT 50
-            """).fetchall()
+        candidate_patterns = []
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute("""
+                    SELECT mistake_signature, lesson_learned, rsi_entry, ema_ratio, volatility_atr_pct, pnl_pct
+                    FROM trade_patterns
+                    WHERE outcome = 'LOSS'
+                    ORDER BY created_at DESC
+                    LIMIT 50
+                """).fetchall()
+                for r in rows:
+                    candidate_patterns.append({
+                        "mistake_signature": r["mistake_signature"],
+                        "lesson_learned": r["lesson_learned"],
+                        "rsi_entry": float(r["rsi_entry"]),
+                        "ema_ratio": float(r["ema_ratio"]),
+                        "volatility_atr_pct": float(r["volatility_atr_pct"]),
+                        "pnl_pct": float(r["pnl_pct"]),
+                    })
+        except Exception as e:
+            logger.debug("SQLite pattern read failed: %s", e)
 
-        if not rows:
+        # Dual-check with Neon PostgreSQL cloud patterns (crucial for ephemeral cloud instances)
+        try:
+            from bot.database.neon_repo import get_neon_repo
+            neon_repo = get_neon_repo()
+            if neon_repo and neon_repo.is_connected:
+                neon_rows = neon_repo.get_learned_patterns(limit=50)
+                for nr in neon_rows:
+                    if nr.get("outcome") == "LOSS":
+                        metrics = nr.get("metrics") or {}
+                        candidate_patterns.append({
+                            "mistake_signature": nr.get("mistake_signature"),
+                            "lesson_learned": nr.get("lesson_learned"),
+                            "rsi_entry": float(metrics.get("rsi_entry", 50.0)),
+                            "ema_ratio": float(metrics.get("ema_ratio", 1.0)),
+                            "volatility_atr_pct": float(metrics.get("volatility_atr_pct", 2.0)),
+                            "pnl_pct": float(metrics.get("pnl_pct", -1.0)),
+                        })
+        except Exception as e:
+            logger.debug("Failed to augment patterns from Neon: %s", e)
+
+        if not candidate_patterns:
             return PatternCheckResult(is_safe=True, risk_multiplier=1.0)
 
         highest_similarity = 0.0
         worst_match = None
 
-        for r in rows:
+        for r in candidate_patterns:
             p_rsi = float(r["rsi_entry"])
             p_ema = float(r["ema_ratio"])
             p_atr = float(r["volatility_atr_pct"])
