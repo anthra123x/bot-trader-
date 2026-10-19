@@ -12,9 +12,10 @@ from bot.models import (
     TradeSignal,
 )
 from bot.risk.risk_engine import RiskEngine
-from bot.config import BotRiskConfig
+from bot.config import BotConfig, BotRiskConfig
 from bot.brokers.paper import PaperBroker
 from bot.learning.pattern_memory import PatternMemory
+from bot.runner import BotRunner
 
 
 class TestRiskEngine:
@@ -793,6 +794,233 @@ class TestLeanAndFreqtradeProtections:
         res_dup = engine.evaluate(signal, bal, positions=[])
         assert res_dup.is_approved is False
         assert any("allocation limit reached" in r or "ya completada" in r for r in res_dup.rejection_reasons)
+
+    def test_profit_vault_ratchet_floors(self):
+        """Ensure Multi-Tier Profit Vault locks guaranteed profit floors as peak price advances."""
+        config = BotRiskConfig(
+            enable_trailing_stop=True,
+            enable_profit_vault_ratchet=True,
+            trailing_stop_activation_pct=1.2,
+            trailing_stop_distance_pct=1.0,
+            vault_tier1_activation_pct=1.5,
+            vault_tier1_floor_pct=0.4,
+            vault_tier2_activation_pct=2.5,
+            vault_tier2_floor_pct=1.2,
+            vault_tier3_activation_pct=4.0,
+            vault_tier3_floor_pct=2.4,
+            vault_tier4_activation_pct=6.0,
+            vault_tier4_floor_pct=4.2,
+            vault_tier5_activation_pct=8.5,
+            vault_tier5_floor_pct=6.5,
+            vault_tier6_activation_pct=12.0,
+            vault_tier6_floor_pct=9.5,
+        )
+        engine = RiskEngine(config)
+
+        # Entry at $100, initial SL at $97.50
+        entry = 100.0
+        current_sl = 97.50
+
+        # 1. Price at $101.50 (+1.5% peak) -> Locks Tier 1 floor (+0.4% = $100.40)
+        new_sl, updated = engine.calculate_trailing_stop("ETH-USD", current_price=101.50, entry_price=entry, current_stop_loss=current_sl)
+        assert updated is True
+        assert new_sl >= 100.40
+        current_sl = new_sl
+
+        # 2. Price at $102.50 (+2.5% peak) -> Locks Tier 2 floor (+1.2% = $101.20)
+        new_sl, updated = engine.calculate_trailing_stop("ETH-USD", current_price=102.50, entry_price=entry, current_stop_loss=current_sl)
+        assert updated is True
+        assert new_sl >= 101.20
+        current_sl = new_sl
+
+        # 3. Price at $104.00 (+4.0% peak) -> Locks Tier 3 floor (+2.4% = $102.40)
+        new_sl, updated = engine.calculate_trailing_stop("ETH-USD", current_price=104.00, entry_price=entry, current_stop_loss=current_sl)
+        assert updated is True
+        assert new_sl >= 102.40
+        current_sl = new_sl
+
+        # 4. Price at $106.00 (+6.0% peak) -> Locks Tier 4 floor (+4.2% = $104.20)
+        new_sl, updated = engine.calculate_trailing_stop("ETH-USD", current_price=106.00, entry_price=entry, current_stop_loss=current_sl)
+        assert updated is True
+        assert new_sl >= 104.20
+        current_sl = new_sl
+
+        # 5. Price pulls back sharply from $106.00 to $104.50 -> Stop loss is PRESERVED, never regresses!
+        new_sl, updated = engine.calculate_trailing_stop("ETH-USD", current_price=104.50, entry_price=entry, current_stop_loss=current_sl)
+        assert new_sl >= 104.20  # Still locked at Tier 4 guaranteed floor
+
+        # 6. Price shoots to $108.50 (+8.5% peak) -> Locks Tier 5 floor (+6.5% = $106.50)
+        new_sl, updated = engine.calculate_trailing_stop("ETH-USD", current_price=108.50, entry_price=entry, current_stop_loss=current_sl)
+        assert updated is True
+        assert new_sl >= 106.50
+        current_sl = new_sl
+
+        # 7. Price shoots to $112.00 (+12.0% peak) -> Locks Tier 6 floor (+9.5% = $109.50)
+        new_sl, updated = engine.calculate_trailing_stop("ETH-USD", current_price=112.00, entry_price=entry, current_stop_loss=current_sl)
+        assert updated is True
+        assert new_sl >= 109.50
+
+    def test_three_stage_partial_take_profit(self):
+        """Ensure partial take profit executes smoothly across Stage 1, Stage 2, and Stage 3."""
+        config = BotRiskConfig(
+            enable_partial_take_profit=True,
+            partial_take_profit_threshold_pct=1.2,
+            partial_take_profit_ratio=0.35,
+            enable_multi_stage_tp=True,
+            stage2_take_profit_threshold_pct=3.0,
+            stage2_take_profit_ratio=0.45,
+            enable_stage3_tp=True,
+            stage3_take_profit_threshold_pct=5.5,
+            stage3_take_profit_ratio=0.50,
+        )
+        engine = RiskEngine(config)
+
+        # Initial position: 100 units at $100.00
+        qty = 100.0
+
+        # Stage 1: +1.2% -> Harvest 35% (35 units)
+        should_tp, harvest_qty = engine.evaluate_partial_take_profit("BTC-USD", current_price=101.20, entry_price=100.0, current_qty=qty)
+        assert should_tp is True
+        assert harvest_qty == 35.0
+        engine.register_partial_tp("BTC-USD")
+        qty -= harvest_qty  # 65.0 units remaining
+        assert engine.get_tp_stage("BTC-USD") == 1
+
+        # Stage 2: +3.0% -> Harvest 45% of 65.0 = 29.25 units
+        should_tp, harvest_qty = engine.evaluate_partial_take_profit("BTC-USD", current_price=103.00, entry_price=100.0, current_qty=qty)
+        assert should_tp is True
+        assert harvest_qty == 29.25
+        engine.register_partial_tp("BTC-USD")
+        qty -= harvest_qty  # 35.75 units remaining
+        assert engine.get_tp_stage("BTC-USD") == 2
+
+        # In between Stage 2 and Stage 3: +4.0% -> False
+        should_tp, _ = engine.evaluate_partial_take_profit("BTC-USD", current_price=104.00, entry_price=100.0, current_qty=qty)
+        assert should_tp is False
+
+        # Stage 3: +5.5% -> Harvest 50% of 35.75 = 17.875 units
+        should_tp, harvest_qty = engine.evaluate_partial_take_profit("BTC-USD", current_price=105.50, entry_price=100.0, current_qty=qty)
+        assert should_tp is True
+        assert harvest_qty == 17.875
+        engine.register_partial_tp("BTC-USD")
+        qty -= harvest_qty
+        assert engine.get_tp_stage("BTC-USD") == 3
+
+        # After stage 3: +8.0% -> False (all 3 stages completed)
+        should_tp, _ = engine.evaluate_partial_take_profit("BTC-USD", current_price=108.00, entry_price=100.0, current_qty=qty)
+        assert should_tp is False
+
+    def test_free_roll_winner_pyramiding(self):
+        """Ensure Free-Roll Winner Pyramiding allows scaling into winners with locked-in profit."""
+        config = BotRiskConfig(
+            max_position_size_pct=10.0,
+            enable_winner_pyramiding=True,
+            min_profit_pct_for_pyramiding=2.8,
+            pyramiding_max_allocation_boost=1.35,
+        )
+        engine = RiskEngine(config, pattern_memory=PatternMemory(db_path=":memory:"))
+        bal = AccountBalance(cash=100_000.0, equity=100_000.0, buying_power=100_000.0, initial_day_equity=100_000.0)
+
+        # 1. Existing position on SOL-USD: Entry $100, Stop Loss ratcheted to $101.50 (guaranteed profit), Current Price $103.50 (+3.5%)
+        # Current holding is $9,500 (near 10% base cap)
+        existing_pos = Position(
+            symbol="SOL-USD",
+            asset_class=AssetClass.CRYPTO,
+            quantity=95.0,
+            entry_price=100.0,
+            current_price=103.50,
+            stop_loss_price=101.50,
+        )
+
+        signal = TradeSignal(
+            symbol="SOL-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.85,
+            current_price=103.50,
+            stop_loss=101.50,
+            metrics={"rsi": 55.0, "ema_ratio": 1.02, "atr": 2.0},
+        )
+
+        # Should be APPROVED because it's a free-roll winner with locked-in profit!
+        res = engine.evaluate(signal, bal, positions=[existing_pos])
+        assert res.is_approved is True
+        assert any("PYRAMIDING_ACTIVE" in w for w in res.risk_warnings)
+        assert res.adjusted_quantity > 0
+
+        # 2. Compare against a LOSING existing position: Entry $100, Current Price $97.00, Stop Loss $95.00
+        existing_loss_pos = Position(
+            symbol="AVAX-USD",
+            asset_class=AssetClass.CRYPTO,
+            quantity=95.0,
+            entry_price=100.0,
+            current_price=97.0,
+            stop_loss_price=95.0,
+        )
+        loss_signal = TradeSignal(
+            symbol="AVAX-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.85,
+            current_price=97.0,
+            stop_loss=95.0,
+            metrics={"rsi": 45.0, "ema_ratio": 0.98, "atr": 2.0},
+        )
+        # Should be REJECTED - never pyramid into losers or unhedged positions!
+        res_loss = engine.evaluate(loss_signal, bal, positions=[existing_loss_pos])
+        assert res_loss.is_approved is False
+
+    def test_runner_target_extension_in_runner(self):
+        """Ensure Runner Target Extension harvests 60% and extends 40% runner to higher target."""
+        config = BotConfig(broker_type="paper")
+        config.risk.enable_runner_target_extension = True
+        config.risk.runner_extension_harvest_ratio = 0.60
+        config.risk.runner_tp_multiplier = 1.08
+
+        config.risk.enable_dynamic_rebalancing = False
+        runner = BotRunner(config=config, broker=PaperBroker())
+        # Simulate that earlier partial TP stages were already harvested on the way up
+        runner.risk_engine.register_partial_tp("NVDA")
+        runner.risk_engine.register_partial_tp("NVDA")
+        runner.risk_engine.register_partial_tp("NVDA")
+        runner.risk_engine.register_position_targets("NVDA", entry_price=100.0, stop_loss=97.5, take_profit=106.0)
+
+        # Create open position at target TP: 100 shares of NVDA, entry $100, price $106.50 >= TP ($106.00)
+        pos = Position(
+            symbol="NVDA",
+            asset_class=AssetClass.EQUITY,
+            quantity=100.0,
+            entry_price=100.0,
+            current_price=106.50,
+            take_profit_price=106.0,
+            stop_loss_price=100.0,
+        )
+        runner.broker.get_positions = lambda: [pos]
+        runner.broker.get_current_price = lambda sym: 106.50
+        runner.broker.get_account_balance = lambda: AccountBalance(cash=100_000.0, equity=100_000.0, buying_power=100_000.0)
+        runner.broker.submit_order = lambda order: order
+
+        closed_orders = runner.manage_open_positions()
+        # 1. An order was executed for 60 shares (60% harvest)
+        assert len(closed_orders) == 1
+        assert closed_orders[0].quantity == 60.0
+        assert closed_orders[0].side == OrderSide.SELL
+
+        # 2. Position remains open with remaining 40 shares (runner)
+        assert pos.quantity == 40.0
+
+        # 3. Target TP was extended (+8% above 106.50 = 115.02)
+        assert pos.take_profit_price > 110.0
+
+        # 4. Stop loss was ratcheted tightly behind current price (within 1.2%)
+        assert pos.stop_loss_price >= 105.0
+
+        # 5. Runner extension was registered in RiskEngine
+        assert runner.risk_engine.is_runner_extended("NVDA") is True
 
 
 

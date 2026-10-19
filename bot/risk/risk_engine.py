@@ -29,6 +29,8 @@ class RiskEngine:
         # Tiered Partial Take-Profit tracker
         self._partial_tp_executed: set[str] = set()
         self._partial_tp_stages: dict[str, int] = {}
+        # Dynamic Runner Target Extension tracker
+        self._runner_extended: set[str] = set()
         # Persistent position targets tracker (Take-Profit & Stop-Loss)
         self._position_targets: dict[str, dict[str, float]] = {}
         # Entry context tracking (RSI, EMA, ATR, Regime) for post-mortem learning
@@ -118,6 +120,25 @@ class RiskEngine:
             if new_stop > curr_sl:
                 self._position_targets[norm_sym]["stop_loss"] = new_stop
 
+    def set_position_target_tp(self, symbol: str, new_tp: float) -> None:
+        """Update target take profit (e.g. for dynamic runner target extension)."""
+        norm_sym = normalize_symbol(symbol)
+        if norm_sym in self._position_targets:
+            self._position_targets[norm_sym]["take_profit"] = new_tp
+        if symbol in self._position_targets:
+            self._position_targets[symbol]["take_profit"] = new_tp
+
+    def register_runner_extended(self, symbol: str) -> None:
+        """Mark runner target extension as active for current position lifecycle."""
+        norm_sym = normalize_symbol(symbol)
+        self._runner_extended.add(norm_sym)
+        self._runner_extended.add(symbol)
+
+    def is_runner_extended(self, symbol: str) -> bool:
+        """Check if runner target extension has already occurred for this symbol."""
+        norm_sym = normalize_symbol(symbol)
+        return norm_sym in self._runner_extended or symbol in self._runner_extended
+
     def register_trade_exit(self, symbol: str, is_loss: bool = False) -> None:
         """Register trade exit to activate Freqtrade CooldownPeriod and StoplossGuard."""
         now = time.time()
@@ -128,6 +149,8 @@ class RiskEngine:
         self._partial_tp_executed.discard(symbol)
         self._partial_tp_stages.pop(norm_sym, None)
         self._partial_tp_stages.pop(symbol, None)
+        self._runner_extended.discard(norm_sym)
+        self._runner_extended.discard(symbol)
         self._position_targets.pop(norm_sym, None)
         self._position_targets.pop(symbol, None)
         self.entry_contexts.pop(norm_sym, None)
@@ -168,6 +191,15 @@ class RiskEngine:
                 stage2_qty = round(current_qty * stage2_ratio, 6)
                 if 0 < stage2_qty < current_qty:
                     return True, stage2_qty
+
+        # Stage 3: Tertiary scale-out threshold (+5.5%)
+        if stage == 2 and getattr(self.config, "enable_stage3_tp", True):
+            stage3_thresh = getattr(self.config, "stage3_take_profit_threshold_pct", 5.5)
+            stage3_ratio = getattr(self.config, "stage3_take_profit_ratio", 0.50)
+            if unrealized_profit_pct >= stage3_thresh:
+                stage3_qty = round(current_qty * stage3_ratio, 6)
+                if 0 < stage3_qty < current_qty:
+                    return True, stage3_qty
 
         return False, 0.0
 
@@ -266,7 +298,30 @@ class RiskEngine:
                 symbol, unrealized_profit_pct, dynamic_be_pct, break_even_sl, entry_price
             )
 
-        # Stage 2: Dynamic LEAN Trailing Stop (if higher than break-even / candidate_sl)
+        # Stage 2: Multi-Tier Profit Vault Ratchet (Absolute Floor Guarantees as peaks expand)
+        if getattr(self.config, "enable_profit_vault_ratchet", True):
+            vault_tiers = [
+                (getattr(self.config, "vault_tier6_activation_pct", 12.0), getattr(self.config, "vault_tier6_floor_pct", 9.5), 6),
+                (getattr(self.config, "vault_tier5_activation_pct", 8.5), getattr(self.config, "vault_tier5_floor_pct", 6.5), 5),
+                (getattr(self.config, "vault_tier4_activation_pct", 6.0), getattr(self.config, "vault_tier4_floor_pct", 4.2), 4),
+                (getattr(self.config, "vault_tier3_activation_pct", 4.0), getattr(self.config, "vault_tier3_floor_pct", 2.4), 3),
+                (getattr(self.config, "vault_tier2_activation_pct", 2.5), getattr(self.config, "vault_tier2_floor_pct", 1.2), 2),
+                (getattr(self.config, "vault_tier1_activation_pct", 1.5), getattr(self.config, "vault_tier1_floor_pct", 0.4), 1),
+            ]
+            for act_pct, floor_pct, tier_num in vault_tiers:
+                if unrealized_profit_pct >= act_pct:
+                    vault_sl = round(entry_price * (1.0 + (floor_pct / 100.0)), 4)
+                    if vault_sl > candidate_sl:
+                        candidate_sl = vault_sl
+                        was_updated = True
+                        logger.info(
+                            "[PROFIT_VAULT] 🔒 %s Bóveda de Ganancias asegurada en Piso Nivel %d: Stop Loss ratcheted a $%.2f "
+                            "(+%.2f%% garantizado sobre entrada $%.2f). Pico alcanzado: +%.2f%%",
+                            symbol, tier_num, vault_sl, floor_pct, entry_price, unrealized_profit_pct,
+                        )
+                    break
+
+        # Stage 3: Dynamic LEAN Trailing Stop (trailing high-water mark behind peak)
         if unrealized_profit_pct >= self.config.trailing_stop_activation_pct:
             trailing_sl = round(peak * (1.0 - (dynamic_distance / 100.0)), 4)
             if trailing_sl > candidate_sl:
@@ -528,7 +583,29 @@ class RiskEngine:
         # b) Fractional Kelly Sizing: scale allocation between 4% (conviction 0.5) and 10% (conviction >= 0.85)
         conviction = max(0.5, min(1.0, signal.confidence))
         alloc_scale = 0.4 + 0.6 * ((conviction - 0.5) / 0.5)
-        max_capital_allocation = balance.equity * ((self.config.max_position_size_pct * alloc_scale) / 100.0)
+        effective_alloc_pct = self.config.max_position_size_pct * alloc_scale
+
+        # Free-Roll Winner Pyramiding: permit controlled compounding into confirmed winning positions
+        is_free_roll_pyramiding = False
+        if existing_position and existing_position.quantity > 0 and getattr(self.config, "enable_winner_pyramiding", True):
+            existing_unrealized_profit_pct = (
+                ((current_price - existing_position.entry_price) / existing_position.entry_price) * 100.0
+            ) if existing_position.entry_price > 0 else 0.0
+            existing_sl = existing_position.stop_loss_price or 0.0
+            is_stop_locked_in_profit = existing_sl >= existing_position.entry_price * 1.002
+            min_pyramid_profit = getattr(self.config, "min_profit_pct_for_pyramiding", 2.8)
+
+            if existing_unrealized_profit_pct >= min_pyramid_profit and is_stop_locked_in_profit and conviction >= 0.70:
+                is_free_roll_pyramiding = True
+                boost = getattr(self.config, "pyramiding_max_allocation_boost", 1.35)
+                effective_alloc_pct = effective_alloc_pct * boost
+                warnings.append(
+                    f"[PYRAMIDING_ACTIVE] 🚀 Posición ganadora en {signal.symbol} (+{existing_unrealized_profit_pct:.2f}% "
+                    f"con Stop asegurado en ${existing_sl:,.2f} > Entrada ${existing_position.entry_price:,.2f}). "
+                    f"Escalando ganadores (cap ampliado a {effective_alloc_pct:.1f}%)."
+                )
+
+        max_capital_allocation = balance.equity * (effective_alloc_pct / 100.0)
         
         # Deduct already invested capital in this asset + in-flight pending orders
         existing_val = existing_position.market_value if existing_position else 0.0

@@ -563,6 +563,81 @@ class BotRunner:
             # Check if target take profit was reached (Harvesting at peak!) or stop loss crossed
             is_target_tp = p.take_profit_price is not None and curr_price >= p.take_profit_price
             is_stop_loss = curr_price <= new_sl
+
+            # Dynamic Runner Target Extension: If target TP reached and momentum is strong,
+            # harvest majority (60%) to bank massive profit, and let 40% runner ride to extended target
+            if is_target_tp and not is_stop_loss:
+                can_extend_runner = (
+                    getattr(self.config.risk, "enable_runner_target_extension", True)
+                    and hasattr(self.risk_engine, "is_runner_extended")
+                    and not self.risk_engine.is_runner_extended(p.symbol)
+                )
+
+                if can_extend_runner:
+                    # Check market regime & momentum
+                    from bot.risk.regime_specialist import REGIME_SPECIALIST, MarketRegime
+                    regime_analysis = None
+                    try:
+                        norm_sym = p.symbol.replace("/", "-")
+                        regime_analysis = REGIME_SPECIALIST.analyze_market_regime(norm_sym)
+                    except Exception:
+                        pass
+
+                    is_defensive = getattr(regime_analysis, "regime", None) == MarketRegime.DEFENSIVE_BEAR_BREAKDOWN
+                    harvest_ratio = getattr(self.config.risk, "runner_extension_harvest_ratio", 0.60)
+                    harvest_qty = round(p.quantity * harvest_ratio, 6)
+                    remaining_runner_qty = round(p.quantity - harvest_qty, 6)
+
+                    # Only extend if not defensive regime and remaining runner qty is viable
+                    if not is_defensive and harvest_qty > 0 and remaining_runner_qty > 0:
+                        harvest_dollars = (curr_price - p.entry_price) * harvest_qty
+                        harvest_pnl_pct = ((curr_price - p.entry_price) / p.entry_price) * 100.0
+
+                        harvest_order = Order(
+                            order_id=str(uuid.uuid4())[:8],
+                            symbol=p.symbol,
+                            asset_class=p.asset_class,
+                            side=OrderSide.SELL,
+                            order_type=OrderType.MARKET,
+                            quantity=harvest_qty,
+                            limit_price=curr_price,
+                            status=OrderStatus.PENDING,
+                        )
+                        executed_harvest = self.broker.submit_order(harvest_order)
+                        p.quantity = remaining_runner_qty
+                        self.notifier.notify_order_execution(executed_harvest)
+                        try:
+                            self.db.save_order(executed_harvest)
+                        except Exception as e:
+                            logger.warning("[NEON] Could not save runner harvest order to Neon: %s", e)
+                        closed_orders.append(executed_harvest)
+
+                        # Register runner extended so we don't extend repeatedly
+                        self.risk_engine.register_runner_extended(p.symbol)
+
+                        # Extend target TP
+                        tp_mult = getattr(self.config.risk, "runner_tp_multiplier", 1.08)
+                        extended_tp = round(curr_price * tp_mult, 4)
+                        p.take_profit_price = extended_tp
+                        if hasattr(self.risk_engine, "set_position_target_tp"):
+                            self.risk_engine.set_position_target_tp(p.symbol, extended_tp)
+
+                        # Tighten stop loss behind current price to protect runner profits
+                        tight_dist_pct = getattr(self.config.risk, "runner_tight_stop_distance_pct", 1.2)
+                        runner_sl = max(new_sl, round(curr_price * (1.0 - (tight_dist_pct / 100.0)), 4))
+                        p.stop_loss_price = runner_sl
+                        if hasattr(self.risk_engine, "update_position_stop"):
+                            self.risk_engine.update_position_stop(p.symbol, runner_sl)
+
+                        logger.info(
+                            "[RUNNER_EXTENSION] 🚀 OBJETIVO R:R ALCANZADO para %s a $%.2f (+%.2f%%). "
+                            "Cosechando %.0f%% (%.6f u = +$%.2f) y EXTENDIENDO RUNNER (%.6f u) "
+                            "a nueva meta $%.2f con Trailing Stop blindado a $%.2f para maximizar ganancias!",
+                            p.symbol, curr_price, harvest_pnl_pct, harvest_ratio * 100.0,
+                            harvest_qty, harvest_dollars, remaining_runner_qty, extended_tp, runner_sl,
+                        )
+                        continue  # Runner position stays open with tight stop and extended target!
+
             should_exit = is_target_tp or is_stop_loss
 
             if should_exit:
