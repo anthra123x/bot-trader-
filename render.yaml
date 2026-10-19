@@ -36,6 +36,10 @@ services:
         value: "6"
       - key: TRADINGAGENTS_GOOGLE_THINKING_LEVEL
         value: high
+      - key: TRADINGAGENTS_QUICK_THINK_LLM
+        value: openai/gpt-oss-20b
+      - key: TRADINGAGENTS_DEEP_THINK_LLM
+        value: qwen/qwen3.8-27b
       - key: ALPACA_API_KEY
         sync: false
       - key: ALPACA_SECRET_KEY
