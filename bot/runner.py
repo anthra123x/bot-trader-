@@ -51,14 +51,15 @@ class BotRunner:
         )
 
         # Specialized graphs: crypto runs focused technicals/market analysis (avoids SEC EDGAR 404s and rate-limit bloat)
+        debug_mode = os.getenv("TRADINGAGENTS_DEBUG", "false").lower() in ("true", "1")
         self.crypto_graph = TradingAgentsGraph(
             selected_analysts=["market"],
-            debug=True,
+            debug=debug_mode,
             config=self.config.tradingagents_config,
         )
         self.equity_graph = TradingAgentsGraph(
             selected_analysts=["market", "fundamentals"],
-            debug=True,
+            debug=debug_mode,
             config=self.config.tradingagents_config,
         )
         self.graph = self.equity_graph
