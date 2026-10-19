@@ -80,6 +80,10 @@ from bot.learning.pattern_memory import PatternMemory
 from dashboard.scheduler import BotScheduler
 
 neon_repo = get_neon_repo()
+_local_token = os.getenv("ALPACA_ACCESS_TOKEN")
+if _local_token and neon_repo.ping():
+    neon_repo.set_system_config("ALPACA_ACCESS_TOKEN", _local_token)
+
 broker_instance = get_broker(BOT_CONFIG.broker_type)
 pattern_memory = PatternMemory()
 bot_runner = BotRunner(broker=broker_instance, db=neon_repo)

@@ -102,6 +102,10 @@ class NeonRepository:
             logger.debug("[NEON] Ping failed: %s", e)
             return False
 
+    @property
+    def is_connected(self) -> bool:
+        return self._is_enabled and self.pool is not None
+
     # --------------------------------------------------------------------------
     # ORDERS
     # --------------------------------------------------------------------------
@@ -442,6 +446,40 @@ class NeonRepository:
         except Exception as e:
             logger.error("[NEON] Error leyendo patrones de aprendizaje: %s", e)
             return []
+
+    def get_system_config(self, key: str) -> str | None:
+        """Retrieve a system configuration or secret value stored in Neon."""
+        if not self._is_enabled:
+            return None
+        query = "SELECT value FROM system_config WHERE key = %s LIMIT 1;"
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query, (key,))
+                    row = cur.fetchone()
+                    return row[0] if row else None
+        except Exception as e:
+            logger.debug("[NEON] Failed to read system config %s: %s", key, e)
+            return None
+
+    def set_system_config(self, key: str, value: str) -> bool:
+        """Store or update a system configuration or secret in Neon."""
+        if not self._is_enabled:
+            return False
+        query = """
+            INSERT INTO system_config (key, value, updated_at)
+            VALUES (%s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (key) DO UPDATE
+            SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP;
+        """
+        try:
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(query, (key, value))
+            return True
+        except Exception as e:
+            logger.error("[NEON] Failed to set system config %s: %s", key, e)
+            return False
 
 
 # Global Singleton Helper

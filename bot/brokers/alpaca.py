@@ -43,6 +43,18 @@ class AlpacaBroker(BaseBroker):
                     self.access_token = content.get("access_token", "")
                 except Exception:
                     pass
+
+        # Auto-detect access token from Neon Database system_config (for cloud deployments like Render)
+        if not (self.api_key and self.secret_key) and not self.access_token:
+            try:
+                from bot.database.neon_repo import get_neon_repo
+                repo = get_neon_repo()
+                token = repo.get_system_config("ALPACA_ACCESS_TOKEN")
+                if token:
+                    self.access_token = token
+                    logger.info("[ALPACA] Token OAuth recuperado exitosamente desde Neon Database.")
+            except Exception as e:
+                logger.debug("[ALPACA] No se pudo leer token desde Neon DB: %s", e)
         
         self.base_url = (
             "https://paper-api.alpaca.markets"

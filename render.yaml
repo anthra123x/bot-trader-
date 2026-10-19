@@ -44,6 +44,8 @@ services:
         sync: false
       - key: ALPACA_SECRET_KEY
         sync: false
+      - key: ALPACA_ACCESS_TOKEN
+        sync: false
       - key: DATABASE_URL
         sync: false
       - key: GOOGLE_API_KEY
