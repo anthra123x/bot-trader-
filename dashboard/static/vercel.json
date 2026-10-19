@@ -1,0 +1,17 @@
+{
+  "cleanUrls": true,
+  "rewrites": [
+    {
+      "source": "/static/:match*",
+      "destination": "/:match*"
+    },
+    {
+      "source": "/api/:match*",
+      "destination": "https://tradingagents-engine.onrender.com/api/:match*"
+    },
+    {
+      "source": "/health",
+      "destination": "https://tradingagents-engine.onrender.com/health"
+    }
+  ]
+}

@@ -1,12 +1,71 @@
 // ==============================================================================
-// TRADING AGENTS - DASHBOARD JAVASCRIPT CONTROLLER
+// DYNAMIC BACKEND RESOLVER (Vercel / Cloud / Multi-Environment Support)
 // ==============================================================================
+function getBackendEndpoint(url) {
+  if (typeof url === 'string' && (url.startsWith('/api') || url.startsWith('/health'))) {
+    const custom = localStorage.getItem('TRADINGAGENTS_BACKEND_URL');
+    if (custom) {
+      return `${custom.replace(/\/$/, '')}${url}`;
+    }
+  }
+  return url;
+}
+
+const originalFetch = window.fetch;
+window.fetch = function(resource, init) {
+  if (typeof resource === 'string') {
+    resource = getBackendEndpoint(resource);
+  }
+  return originalFetch.call(this, resource, init);
+};
+
+function updateBackendBadge() {
+  const custom = localStorage.getItem('TRADINGAGENTS_BACKEND_URL');
+  const badge = document.getElementById('active-backend-badge');
+  const dot = document.getElementById('backend-status-dot');
+  if (badge) {
+    if (custom) {
+      const cleanHost = custom.replace(/^https?:\/\//, '').split('/')[0];
+      badge.innerText = `🔗 ${cleanHost.slice(0, 18)}`;
+      badge.title = `Conectado a: ${custom} (Click para cambiar URL)`;
+    } else {
+      badge.innerText = `🔗 Backend Auto`;
+      badge.title = `Conectado al host actual / Render proxy (Click para cambiar URL)`;
+    }
+  }
+  if (dot) dot.className = 'status-dot online';
+}
+
+function promptBackendUrl() {
+  const current = localStorage.getItem('TRADINGAGENTS_BACKEND_URL') || '';
+  const newUrl = prompt(
+    'Configurar URL del Servidor Backend (Render Cloud o Túnel):\n\n' +
+    'Ejemplo: https://tradingagents-engine.onrender.com\n' +
+    'Deja vacío para usar el backend automático / Vercel proxy:',
+    current
+  );
+  if (newUrl !== null) {
+    if (newUrl.trim() === '' || newUrl.trim().toLowerCase() === 'default') {
+      localStorage.removeItem('TRADINGAGENTS_BACKEND_URL');
+      alert('Configuración restaurada al backend por defecto.');
+    } else {
+      let cleaned = newUrl.trim().replace(/\/$/, '');
+      if (!cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
+        cleaned = 'https://' + cleaned;
+      }
+      localStorage.setItem('TRADINGAGENTS_BACKEND_URL', cleaned);
+      alert(`Servidor backend configurado a: ${cleaned}`);
+    }
+    window.location.reload();
+  }
+}
 
 let equityChartInstance = null;
 let currentTab = 'all';
 let equityHistory = [];
 
 document.addEventListener('DOMContentLoaded', () => {
+  updateBackendBadge();
   initEquityChart();
   loadEquityHistory();
   fetchTelemetryData();
@@ -24,6 +83,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Check initial notification push permission
   checkNotificationPermissionUI();
 });
+
 
 // Fetch Market Regime & Volatility Specialist
 async function fetchMarketRegime() {
