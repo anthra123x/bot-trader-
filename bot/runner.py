@@ -26,6 +26,8 @@ from bot.models import (
     TradeSignal,
 )
 from bot.notifications.notifier import Notifier
+from bot.reasoning.agent_brain import AgentBrain
+from bot.reasoning.mcp_adapter import MCPTradingAdapter
 from bot.risk.quant_screener import QuantScreener, QuantScreenResult
 from bot.risk.risk_engine import RiskEngine
 
@@ -46,6 +48,14 @@ class BotRunner:
         self.db = db or get_neon_repo()
         self.risk_engine = RiskEngine(self.config.risk)
         self.quant_screener = QuantScreener()
+        self.brain = AgentBrain(
+            config=self.config,
+            broker=self.broker,
+            risk_engine=self.risk_engine,
+            db=self.db,
+            quant_screener=self.quant_screener,
+        )
+        self.mcp_adapter = MCPTradingAdapter(brain=self.brain, config=self.config)
         self.notifier = Notifier(
             telegram_token=self.config.telegram_bot_token,
             telegram_chat_id=self.config.telegram_chat_id,
@@ -359,13 +369,26 @@ class BotRunner:
 
         # Record multi-agent consensus, perspective notes, and signals in Neon PostgreSQL
         try:
+            # Build and deliberate REA Evidence Ledger
+            ledger = self.brain.decompile_state(symbol, date)
+            deliberated_ledger = self.brain.deliberate_and_synthesize(
+                ledger=ledger,
+                candidate_rating=rating,
+                confidence=round(screen_res.score / 100.0, 2) if screen_res else 0.75,
+                target_price=screen_res.suggested_take_profit if screen_res else None,
+                stop_loss=screen_res.suggested_stop_loss if screen_res else None,
+                rationale=str(final_state.get("final_trade_decision") or ""),
+            )
             analyst_signals = {
+                "evidence_ledger_id": deliberated_ledger.ledger_id,
+                "fingerprint": deliberated_ledger.compute_fingerprint(),
                 "quant_setup": f"{screen_res.setup_name} ({screen_res.rationale})",
                 "market_report": str(final_state.get("market_report") or "")[:500],
                 "fundamentals_report": str(final_state.get("fundamentals_report") or "")[:500],
                 "bull_perspective": str(final_state.get("bull_perspective") or "")[:500],
                 "bear_perspective": str(final_state.get("bear_perspective") or "")[:500],
                 "trader_plan": str(final_state.get("trader_investment_plan") or "")[:500],
+                "evidence_ledger": deliberated_ledger.model_dump(mode="json"),
             }
             reasoning = str(final_state.get("final_trade_decision") or "")
             self.db.save_debate(
@@ -378,7 +401,7 @@ class BotRunner:
                 reasoning=reasoning,
             )
         except Exception as e:
-            logger.warning("[NEON] No se pudo registrar debate en Neon: %s", e)
+            logger.warning("[NEON] No se pudo registrar debate con Evidence Ledger en Neon: %s", e)
 
         return self.process_signal_and_execute(symbol, rating, final_state, current_price, date, quant_result=screen_res)
 
