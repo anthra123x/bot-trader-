@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TradingAgents OS | Monitor Autónomo de Trading Cuantitativo</title>
-  <meta name="description" content="Terminal ejecutiva y monitor autónomo en tiempo real para TradingAgents con Alpaca, QuantConnect LEAN y Freqtrade.">
-  <link rel="stylesheet" href="/static/css/style.css?v=7.0">
+  <title>TradingAgents OS | Monitor Autónomo Cuantitativo</title>
+  <meta name="description" content="Terminal ejecutiva y monitor cuantitativo en tiempo real para TradingAgents con Alpaca y Render.">
+  <link rel="stylesheet" href="/static/css/style.css?v=8.0">
   <!-- Chart.js CDN for live equity curve -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 </head>
@@ -14,57 +14,55 @@
     <!-- Top Executive Header -->
     <header class="app-header">
       <div class="brand-section">
-        <div class="logo-badge" id="app-logo-badge">⚡</div>
+        <div class="logo-badge" id="app-logo-badge">TA</div>
         <div class="brand-titles">
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <h1>TradingAgents OS</h1>
-            <span class="badge-version">v2.0 AUTÓNOMO</span>
-          </div>
-          <span>Autonomous Quantitative Engine</span>
+          <h1>
+            TradingAgents
+            <span class="badge-version">2.0 AUTO</span>
+          </h1>
+          <span>Autonomous Engine</span>
         </div>
       </div>
 
-      <!-- Ticker horizontal con desplazamiento táctil suave para móvil -->
+      <!-- Ticker horizontal minimalista -->
       <div class="header-status-ticker">
         <div class="header-status-group">
           <div class="status-pill" id="bot-status-pill">
             <span class="status-dot online" id="bot-status-dot"></span>
-            <span id="bot-status-text">Operando 24/7 autónomo</span>
+            <span id="bot-status-text">Live 24/7</span>
           </div>
           <div class="status-pill">
             <span id="active-broker-badge">Alpaca Paper</span>
           </div>
           <div class="status-pill" id="db-status-pill">
             <span class="status-dot online" id="db-status-dot"></span>
-            <span id="active-db-badge" style="color: var(--accent-success);">Neon PostgreSQL</span>
+            <span id="active-db-badge">Neon Cloud</span>
           </div>
           <div class="status-pill" id="regime-status-pill" title="Especialista de Régimen y Volatilidad Dinámica">
             <span class="status-dot online" id="regime-status-dot"></span>
-            <span id="active-regime-badge" style="color: #38bdf8;">Régimen: Evaluando...</span>
+            <span id="active-regime-badge">Régimen: Evaluando...</span>
           </div>
-          <div class="status-pill" id="sentiment-status-pill" title="Subagente Investigador de Sentimiento Web 24/7">
+          <div class="status-pill" id="sentiment-status-pill" title="Investigador de Sentimiento Web Macro">
             <span class="status-dot online" id="sentiment-status-dot"></span>
-            <span id="active-sentiment-badge" style="color: #c084fc;">🌐 Web: FGI 59</span>
+            <span id="active-sentiment-badge">FGI 59 • Neutral</span>
           </div>
-          <div class="status-pill" id="backend-status-pill" onclick="promptBackendUrl()" title="Conexión de Backend (Click para cambiar URL del servidor)" style="cursor: pointer;">
+          <div class="status-pill" id="backend-status-pill" onclick="promptBackendUrl()" title="Conexión de Backend (Click para cambiar URL)" style="cursor: pointer;">
             <span class="status-dot online" id="backend-status-dot"></span>
-            <span id="active-backend-badge" style="color: #a78bfa;">🔗 Backend</span>
+            <span id="active-backend-badge">Vercel Cloud</span>
           </div>
         </div>
       </div>
 
-
       <div class="header-actions">
-        <!-- Botón de Centro de Notificaciones -->
-        <button class="btn-icon-badge" id="btn-notifications-toggle" onclick="toggleNotificationsModal()" title="Centro de Notificaciones en Vivo">
-          <span class="bell-icon">🔔</span>
+        <button class="btn-icon-badge" id="btn-notifications-toggle" onclick="toggleNotificationsModal()" title="Centro de Notificaciones">
+          <span style="font-size: 13px;">N</span>
           <span class="badge-count" id="notif-badge-count">0</span>
         </button>
         <button class="btn btn-secondary header-btn-scan" onclick="triggerFullScan()" title="Ejecuta un barrido inmediato de análisis en la cartera">
-          ⚡ Escanear
+          Escanear
         </button>
         <button class="btn btn-danger header-btn-kill" id="btn-kill-switch" onclick="triggerKillSwitch()" title="Detención inmediata de todas las operaciones">
-          🚨 Parar
+          Detener
         </button>
       </div>
     </header>
@@ -75,8 +73,7 @@
       <section class="kpi-grid">
         <div class="kpi-card" id="card-equity">
           <div class="kpi-header">
-            <span class="kpi-title">Cartera Total (Equity)</span>
-            <span class="kpi-icon">💰</span>
+            <span class="kpi-title">Cartera Total</span>
           </div>
           <div class="kpi-value" id="kpi-equity">$100,000.00</div>
           <div class="kpi-subtext" id="kpi-cash-sub">
@@ -86,34 +83,31 @@
 
         <div class="kpi-card" id="card-pnl">
           <div class="kpi-header">
-            <span class="kpi-title">P&L de la Sesión</span>
-            <span class="kpi-icon">📈</span>
+            <span class="kpi-title">P&L Sesión</span>
           </div>
           <div class="kpi-value" id="kpi-pnl">$0.00</div>
           <div class="kpi-subtext" id="kpi-pnl-realized">
-            Conectado a Alpaca Matching Engine
+            Alpaca Matching Engine
           </div>
         </div>
 
         <div class="kpi-card" id="card-buying-power">
           <div class="kpi-header">
-            <span class="kpi-title">Poder de Compra (Liquidez)</span>
-            <span class="kpi-icon">⚡</span>
+            <span class="kpi-title">Poder de Compra</span>
           </div>
           <div class="kpi-value" id="kpi-buying-power">$400,000.00</div>
           <div class="kpi-subtext" id="kpi-equity-sub">
-            Margen 4x Alpaca Paper
+            Margen 4x Alpaca
           </div>
         </div>
 
         <div class="kpi-card" id="card-drawdown">
           <div class="kpi-header">
-            <span class="kpi-title">Control de Riesgo & Drawdown</span>
-            <span class="kpi-icon">🛡️</span>
+            <span class="kpi-title">Control de Riesgo</span>
           </div>
           <div class="kpi-value" id="kpi-drawdown">0.00%</div>
           <div class="kpi-subtext" id="kpi-winrate-sub">
-            Win Rate: 0.0% • Freqtrade Guard Activo
+            Drawdown Máx: 0.0%
           </div>
         </div>
       </section>
@@ -128,24 +122,24 @@
             <div class="card-panel">
               <div class="card-header">
                 <div class="card-title-group">
-                  <span class="card-title">Trayectoria de Equity en Tiempo Real</span>
-                  <span class="badge badge-success">Live Feed</span>
+                  <span class="card-title">Curva de Equity</span>
+                  <span class="badge badge-success">Live</span>
                 </div>
-                <button class="btn btn-secondary" style="padding: 4px 10px; font-size: 12px;" onclick="fetchTelemetryData()">🔄 Actualizar</button>
+                <button class="btn btn-secondary" style="padding: 3px 8px; font-size: 11px;" onclick="fetchTelemetryData()">Actualizar</button>
               </div>
               <div class="chart-wrapper">
                 <canvas id="equityChart"></canvas>
               </div>
             </div>
 
-            <!-- Open Positions & Trailing Stops (LEAN Model) -->
-            <div class="card-panel">
+            <!-- Open Positions & Trailing Stops -->
+            <div class="card-panel" style="margin-top: 16px;">
               <div class="card-header">
                 <div class="card-title-group">
-                  <span class="card-title">Posiciones Activas & Trailing Stops</span>
+                  <span class="card-title">Posiciones Activas</span>
                   <span class="badge badge-info" id="positions-count-badge">0 Activas</span>
                 </div>
-                <span class="header-hint">Protección LEAN (+1.5% Offset)</span>
+                <span class="header-hint">Protección LEAN • Offset +1.5%</span>
               </div>
               <div class="table-responsive">
                 <table class="data-table" id="positions-table">
@@ -162,7 +156,7 @@
                   <tbody id="positions-table-body">
                     <tr>
                       <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 32px;">
-                        No hay posiciones abiertas actualmente. El capital está 100% resguardado.
+                        Cargando posiciones...
                       </td>
                     </tr>
                   </tbody>
@@ -176,9 +170,9 @@
             <div class="card-panel">
               <div class="card-header">
                 <div class="card-title-group">
-                  <span class="card-title">Registro de Órdenes y Auditoría en Alpaca</span>
+                  <span class="card-title">Registro de Órdenes y Auditoría</span>
                 </div>
-                <span class="header-hint" id="orders-refresh-hint">Sincronizado con Matching Engine</span>
+                <span class="header-hint" id="orders-refresh-hint">Matching Engine Sync</span>
               </div>
               <div class="table-responsive">
                 <table class="data-table" id="orders-table">
@@ -196,7 +190,7 @@
                   <tbody id="orders-table-body">
                     <tr>
                       <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 32px;">
-                        No hay órdenes ejecutadas en esta sesión.
+                        Cargando auditoría de órdenes...
                       </td>
                     </tr>
                   </tbody>
@@ -211,8 +205,8 @@
           <!-- Monitored Universe Micro-Card -->
           <div class="card-panel">
             <div class="card-header">
-              <span class="card-title">Cartera en Monitoreo Continuo</span>
-              <span class="badge badge-success">8 Activos</span>
+              <span class="card-title">Universo en Monitoreo</span>
+              <span class="badge badge-info">8 Activos</span>
             </div>
             <div style="padding: 16px;">
               <div class="watchlist-tags" id="watchlist-container">
@@ -228,15 +222,15 @@
               <div class="safeguards-summary">
                 <div class="safeguard-item">
                   <span class="safeguard-dot"></span>
-                  <span><strong>Trailing Stop:</strong> Bloqueo dinámico adaptado por volatilidad</span>
+                  <span><strong>Trailing Stop:</strong> Bloqueo dinámico por volatilidad</span>
                 </div>
                 <div class="safeguard-item">
                   <span class="safeguard-dot"></span>
-                  <span><strong>Scale-Out:</strong> Toma del 40% de ganancias a +1.0% de beneficio</span>
+                  <span><strong>Scale-Out:</strong> Toma del 40% a +1.0% de ganancia</span>
                 </div>
                 <div class="safeguard-item">
                   <span class="safeguard-dot"></span>
-                  <span><strong>Rebalanceo:</strong> Recorte automático al superar 35% de concentración</span>
+                  <span><strong>Rebalanceo:</strong> Salida al superar 35% de concentración</span>
                 </div>
               </div>
             </div>
@@ -246,19 +240,19 @@
           <div class="agent-terminal" style="flex: 1; display: flex; flex-direction: column;">
             <div class="terminal-header">
               <div class="terminal-dots">
-                <span class="t-dot red"></span>
-                <span class="t-dot yellow"></span>
-                <span class="t-dot green"></span>
-                <span style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); margin-left: 6px;">autonomous_stream.log</span>
+                <span class="t-dot"></span>
+                <span class="t-dot"></span>
+                <span class="t-dot"></span>
+                <span style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); margin-left: 6px;">stream.log</span>
               </div>
               <div class="terminal-tabs">
-                <button class="terminal-tab active" onclick="switchTerminalTab('all')">Feed de Agentes</button>
-                <button class="terminal-tab" onclick="switchTerminalTab('agents')">Solo Consenso</button>
+                <button class="terminal-tab active" onclick="switchTerminalTab('all')">Feed</button>
+                <button class="terminal-tab" onclick="switchTerminalTab('agents')">Consenso</button>
                 <button class="terminal-tab" onclick="clearTerminal()">Limpiar</button>
               </div>
             </div>
             <div class="terminal-content" id="terminal-logs">
-              <div class="log-entry"><span class="log-time">[00:00:00]</span><span class="log-info">TradingAgents OS operando en modo 100% autónomo.</span></div>
+              <div class="log-entry"><span class="log-time">[00:00:00]</span><span class="log-info">Motor autónomo inicializado.</span></div>
             </div>
           </div>
         </div>
@@ -269,38 +263,34 @@
   <!-- Contenedor Flotante de Toasts y Notificaciones en Pantalla -->
   <div id="toast-container" class="toast-container" aria-live="polite"></div>
 
-  <!-- Modal / Drawer: Centro de Notificaciones y Configuración de Alertas -->
+  <!-- Modal / Drawer: Centro de Notificaciones -->
   <div id="notifications-modal" class="modal-backdrop" style="display: none;">
     <div class="modal-dialog modal-notifications">
       <div class="modal-header">
-        <div style="display: flex; align-items: center; gap: 10px;">
-          <span style="font-size: 22px;">🔔</span>
-          <div>
-            <h3>Centro de Notificaciones & Alertas</h3>
-            <span style="font-size: 11px; color: var(--text-muted);">Monitoreo de movimientos 24/7 en tiempo real</span>
-          </div>
+        <div>
+          <h3>Notificaciones del Sistema</h3>
+          <span style="font-size: 11px; color: var(--text-muted);">Eventos de ejecución y órdenes</span>
         </div>
         <button class="modal-close" onclick="toggleNotificationsModal()">✕</button>
       </div>
       <div class="modal-body">
-        <!-- Control de Notificaciones del Navegador / Móvil -->
         <div class="notif-settings-card">
           <div class="notif-toggle-row">
             <div>
-              <strong>Notificaciones Nativas en este Dispositivo</strong>
+              <strong>Notificaciones Push</strong>
               <p style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">
-                Recibe avisos push en tu móvil cada vez que el bot ejecute compras, tomas de ganancias o salidas.
+                Alertas nativas ante compras, tomas de ganancias y stops.
               </p>
             </div>
             <button class="btn btn-secondary" id="btn-request-push" onclick="enablePushNotifications()">
-              🔔 Activar en este Móvil
+              Activar
             </button>
           </div>
           <div class="notif-toggle-row" style="margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border-subtle);">
             <div>
-              <strong>Alertas Sonoras (Chime Melódico)</strong>
+              <strong>Alerta Sonora</strong>
               <p style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">
-                Reproduce un tono suave y agradable ante eventos clave.
+                Tono acústico ante eventos de ejecución.
               </p>
             </div>
             <label class="switch-toggle">
@@ -308,36 +298,12 @@
               <span class="slider-round"></span>
             </label>
           </div>
-          <div style="margin-top: 14px;">
-            <button class="btn btn-secondary" style="font-size: 12px; width: 100%;" onclick="triggerTestNotification()">
-              ⚡ Probar Alerta en Vivo (Sonido + Notificación + Toast)
-            </button>
-          </div>
         </div>
 
-        <!-- Integración Opcional con Telegram / Webhooks -->
-        <div class="notif-settings-card" style="margin-top: 14px;">
-          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-            <strong>Canal de Telegram (Alertas 24/7 al Móvil)</strong>
-            <span class="badge badge-info" id="telegram-status-badge">Opcional</span>
-          </div>
-          <p style="font-size: 11px; color: var(--text-muted); margin-bottom: 10px;">
-            Si deseas que las alertas te lleguen directo a tu chat de Telegram aunque no tengas la web abierta:
-          </p>
-          <div class="form-row-2col">
-            <input type="password" id="input-tg-token" class="form-input" placeholder="Telegram Bot Token">
-            <input type="text" id="input-tg-chat" class="form-input" placeholder="Telegram Chat ID">
-          </div>
-          <button class="btn btn-secondary" style="font-size: 12px; margin-top: 10px; width: 100%;" onclick="saveTelegramSettings()">
-            💾 Guardar Credenciales de Telegram
-          </button>
-        </div>
-
-        <!-- Registro de Movimientos Recientes -->
         <div style="margin-top: 18px;">
           <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-            <strong>Historial de Movimientos del Sistema</strong>
-            <button class="btn-link" onclick="fetchNotifications()">🔄 Refrescar</button>
+            <strong>Historial Reciente</strong>
+            <button class="btn-link" onclick="fetchNotifications()">Refrescar</button>
           </div>
           <div id="notifications-feed" class="notifications-feed">
             <div style="text-align: center; color: var(--text-muted); padding: 24px;">Cargando notificaciones...</div>
@@ -347,29 +313,24 @@
     </div>
   </div>
 
-  <!-- Barra de Navegación Móvil Inferior (Estilo App Nativa) -->
+  <!-- Barra de Navegación Móvil Inferior -->
   <nav class="mobile-bottom-nav">
     <button class="mobile-nav-btn active" id="mob-nav-portfolio" onclick="switchMobileView('portfolio')">
-      <span class="nav-icon">📊</span>
       <span class="nav-label">Portafolio</span>
     </button>
     <button class="mobile-nav-btn" id="mob-nav-orders" onclick="switchMobileView('orders')">
-      <span class="nav-icon">⚡</span>
       <span class="nav-label">Órdenes</span>
     </button>
     <button class="mobile-nav-btn" id="mob-nav-agents" onclick="switchMobileView('agents')">
-      <span class="nav-icon">🤖</span>
       <span class="nav-label">Agentes</span>
     </button>
     <button class="mobile-nav-btn" id="mob-nav-alerts" onclick="toggleNotificationsModal()">
-      <span class="nav-icon">🔔</span>
       <span class="nav-label">Alertas</span>
       <span class="nav-badge-pill" id="mobile-badge-count">0</span>
     </button>
   </nav>
-  </div>
 
-  <!-- Hidden compatibility elements to prevent null exceptions in existing controller routines -->
+  <!-- Hidden compatibility elements to prevent null exceptions in existing routines -->
   <div style="display: none;">
     <button id="btn-toggle-sim" onclick="toggleSimulation()"></button>
     <button id="btn-reset-sim" onclick="resetSimulation()"></button>
@@ -388,6 +349,6 @@
     </div>
   </div>
 
-  <script src="/static/js/app.js?v=7.0"></script>
+  <script src="/static/js/app.js?v=8.0"></script>
 </body>
 </html>

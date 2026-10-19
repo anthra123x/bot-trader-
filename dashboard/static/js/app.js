@@ -1,7 +1,11 @@
+// ==============================================================================
+// TRADINGAGENTS OS - CLIENT CONTROLLER (MINIMALIST MONOCHROME EDITION)
+// ==============================================================================
+
 // Auto-migrate stale Render manual override so Vercel's native serverless functions take over
 try {
   const existingBackend = localStorage.getItem('TRADINGAGENTS_BACKEND_URL');
-  if (existingBackend && existingBackend.includes('onrender.com')) {
+  if (existingBackend && (existingBackend.includes('onrender.com') || existingBackend.includes('trycloudflare.com'))) {
     localStorage.removeItem('TRADINGAGENTS_BACKEND_URL');
   }
 } catch (e) {}
@@ -31,29 +35,28 @@ function updateBackendBadge() {
   if (badge) {
     if (custom) {
       const cleanHost = custom.replace(/^https?:\/\//, '').split('/')[0];
-      badge.innerText = `🔗 ${cleanHost.slice(0, 18)}`;
+      badge.innerText = `${cleanHost.slice(0, 16)}`;
       badge.title = `Conectado a: ${custom} (Click para cambiar URL)`;
     } else {
-      badge.innerText = `⚡ Vercel Cloud`;
+      badge.innerText = `Vercel Cloud`;
       badge.title = `Vercel Serverless conectado a Alpaca en tiempo real (Click para cambiar URL)`;
     }
   }
   if (dot) dot.className = 'status-dot online';
 }
 
-
 function promptBackendUrl() {
   const current = localStorage.getItem('TRADINGAGENTS_BACKEND_URL') || '';
   const newUrl = prompt(
     'Configurar URL del Servidor Backend (Render Cloud o Túnel):\n\n' +
     'Ejemplo: https://bot-trader-dear.onrender.com\n' +
-    'Deja vacío para usar el backend automático / Vercel proxy:',
+    'Deja vacío para usar el backend automático / Vercel Edge proxy:',
     current
   );
   if (newUrl !== null) {
     if (newUrl.trim() === '' || newUrl.trim().toLowerCase() === 'default') {
       localStorage.removeItem('TRADINGAGENTS_BACKEND_URL');
-      alert('Configuración restaurada al backend por defecto.');
+      alert('Configuración restaurada al backend por defecto (Vercel Serverless).');
     } else {
       let cleaned = newUrl.trim().replace(/\/$/, '');
       if (!cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
@@ -68,28 +71,29 @@ function promptBackendUrl() {
 
 let equityChartInstance = null;
 let currentTab = 'all';
-let equityHistory = [];
 
 document.addEventListener('DOMContentLoaded', () => {
   updateBackendBadge();
   initEquityChart();
   loadEquityHistory();
   fetchTelemetryData();
+  fetchPositions();
+  fetchOrders();
   fetchWatchlist();
   fetchLogs();
   fetchMarketRegime();
 
-  // Polling every 5 seconds for telemetry, regime, logs, and notifications
-  setInterval(fetchTelemetryData, 5000);
+  // Periodic polling
+  setInterval(fetchTelemetryData, 4000);
+  setInterval(fetchPositions, 5000);
+  setInterval(fetchOrders, 8000);
   setInterval(fetchMarketRegime, 10000);
   setInterval(fetchLogs, 3000);
-  setInterval(fetchNotifications, 4000);
+  setInterval(fetchNotifications, 5000);
   fetchNotifications();
 
-  // Check initial notification push permission
   checkNotificationPermissionUI();
 });
-
 
 // Fetch Market Regime & Volatility Specialist
 async function fetchMarketRegime() {
@@ -100,8 +104,8 @@ async function fetchMarketRegime() {
     const badge = document.getElementById('active-regime-badge');
     const dot = document.getElementById('regime-status-dot');
     if (badge) {
-      badge.innerText = `Régimen: ${data.regime_display} (Vol: ${data.realized_volatility_20d}%)`;
-      badge.title = `${data.rationale} | TP: ${data.tp_multiplier}x ATR, SL: ${data.sl_multiplier}x ATR, BE: +${data.break_even_pct}%`;
+      badge.innerText = `Vol ${data.realized_volatility_20d}% • ${data.regime_display.split('/')[0].trim()}`;
+      badge.title = `${data.rationale} | TP: ${data.tp_multiplier}x ATR, SL: ${data.sl_multiplier}x ATR`;
     }
     if (dot) {
       dot.className = `status-dot ${data.regime === 'DEFENSIVE_BEAR_BREAKDOWN' ? 'offline' : 'online'}`;
@@ -111,20 +115,18 @@ async function fetchMarketRegime() {
       const sBadge = document.getElementById('active-sentiment-badge');
       const sDot = document.getElementById('sentiment-status-dot');
       if (sBadge) {
-        sBadge.innerText = `🌐 Web: ${data.web_sentiment.sentiment_label} (FGI: ${data.web_sentiment.fear_greed_value})`;
-        const catalysts = (data.web_sentiment.macro_catalysts || []).slice(0, 3).join(' \n• ');
-        sBadge.title = `Índice Miedo/Codicia: ${data.web_sentiment.fear_greed_value}/100 (${data.web_sentiment.fear_greed_classification})\nScore Sentimiento: ${data.web_sentiment.sentiment_score}\nTitulares Macro:\n• ${catalysts}`;
+        sBadge.innerText = `FGI ${data.web_sentiment.fear_greed_value} • ${data.web_sentiment.sentiment_label}`;
       }
       if (sDot) {
         sDot.className = `status-dot ${data.web_sentiment.sentiment_score < -0.3 ? 'offline' : 'online'}`;
       }
     }
   } catch (err) {
-    console.warn('Regime fetch error:', err);
+    console.debug('Regime note:', err);
   }
 }
 
-// Load historical equity curve from Neon PostgreSQL
+// Load historical equity curve
 async function loadEquityHistory() {
   try {
     const res = await fetch('/api/equity/history?limit=30');
@@ -143,12 +145,14 @@ async function loadEquityHistory() {
   }
 }
 
-// Chart Initialization
+// Minimalist Monochrome Chart Initialization
 function initEquityChart() {
-  const ctx = document.getElementById('equityChart').getContext('2d');
-  const gradient = ctx.createLinearGradient(0, 0, 0, 300);
-  gradient.addColorStop(0, 'rgba(99, 102, 241, 0.4)');
-  gradient.addColorStop(1, 'rgba(99, 102, 241, 0.0)');
+  const canvas = document.getElementById('equityChart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const gradient = ctx.createLinearGradient(0, 0, 0, 240);
+  gradient.addColorStop(0, 'rgba(255, 255, 255, 0.08)');
+  gradient.addColorStop(1, 'rgba(255, 255, 255, 0.00)');
 
   equityChartInstance = new Chart(ctx, {
     type: 'line',
@@ -157,14 +161,16 @@ function initEquityChart() {
       datasets: [{
         label: 'Equity ($ USD)',
         data: [],
-        borderColor: '#6366F1',
-        borderWidth: 2.5,
+        borderColor: '#e4e4e7',
+        borderWidth: 2,
         backgroundColor: gradient,
         fill: true,
-        tension: 0.35,
-        pointRadius: 4,
-        pointHoverRadius: 6,
-        pointBackgroundColor: '#06B6D4',
+        tension: 0.25,
+        pointRadius: 3,
+        pointHoverRadius: 5,
+        pointBackgroundColor: '#ffffff',
+        pointBorderColor: '#0c0c0e',
+        pointBorderWidth: 1.5,
       }]
     },
     options: {
@@ -173,11 +179,14 @@ function initEquityChart() {
       plugins: {
         legend: { display: false },
         tooltip: {
-          backgroundColor: '#111827',
-          borderColor: 'rgba(255, 255, 255, 0.1)',
+          backgroundColor: '#161619',
+          borderColor: '#27272a',
           borderWidth: 1,
-          titleColor: '#F8FAFC',
-          bodyColor: '#10B981',
+          titleColor: '#a1a1aa',
+          bodyColor: '#ffffff',
+          titleFont: { family: 'Inter', size: 11 },
+          bodyFont: { family: 'JetBrains Mono', size: 12, weight: '600' },
+          padding: 8,
           displayColors: false,
           callbacks: {
             label: (ctx) => `$${ctx.parsed.y.toLocaleString('en-US', { minimumFractionDigits: 2 })} USD`
@@ -186,14 +195,14 @@ function initEquityChart() {
       },
       scales: {
         x: {
-          grid: { color: 'rgba(255, 255, 255, 0.04)' },
-          ticks: { color: '#64748B', font: { family: 'Plus Jakarta Sans', size: 11 } }
+          grid: { color: 'rgba(255, 255, 255, 0.02)' },
+          ticks: { color: '#71717a', font: { family: 'JetBrains Mono', size: 10 } }
         },
         y: {
-          grid: { color: 'rgba(255, 255, 255, 0.04)' },
+          grid: { color: 'rgba(255, 255, 255, 0.03)' },
           ticks: {
-            color: '#64748B',
-            font: { family: 'Plus Jakarta Sans', size: 11 },
+            color: '#71717a',
+            font: { family: 'JetBrains Mono', size: 10 },
             callback: (v) => `$${v.toLocaleString()}`
           }
         }
@@ -202,7 +211,7 @@ function initEquityChart() {
   });
 }
 
-// Fetch Account Telemetry & Positions
+// Fetch Account Telemetry
 async function fetchTelemetryData() {
   try {
     const res = await fetch('/api/balance');
@@ -213,55 +222,48 @@ async function fetchTelemetryData() {
       const badge = document.getElementById('active-backend-badge');
       const dot = document.getElementById('backend-status-dot');
       if (badge) {
-        badge.innerText = '⚠️ Conectar Backend';
-        badge.title = `El backend actual no responde correctamente (${data.error || 'sin datos'}). Haz clic aquí para ingresar la URL de tu servicio Render.`;
-        badge.style.color = 'var(--accent-warning)';
+        badge.innerText = 'Error Conexión';
+        badge.title = `Error: ${data.error || 'sin datos'}`;
       }
       if (dot) dot.className = 'status-dot offline';
       return;
     }
 
-    
+    // Set Primary KPIs
+    const elEquity = document.getElementById('kpi-equity');
+    if (elEquity) {
+      elEquity.innerText = `$${data.equity.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    }
+    const elBuyingPower = document.getElementById('kpi-buying-power');
+    if (elBuyingPower) {
+      elBuyingPower.innerText = `$${data.buying_power.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    }
+    const elCash = document.getElementById('kpi-cash-sub');
+    if (elCash) {
+      elCash.innerText = `Cash: $${data.cash.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`;
+    }
+
     const badge = document.getElementById('active-broker-badge');
     if (badge) {
-      if (data.is_simulation) {
-        badge.innerText = 'Modo: Simulación (Sintética)';
-        badge.style.color = 'var(--accent-warning)';
-      } else {
-        badge.innerText = 'Broker: Alpaca (Datos Reales)';
-        badge.style.color = 'var(--accent-success)';
-      }
+      badge.innerText = data.is_simulation ? 'Simulación Paper' : 'Alpaca Live Matching';
     }
 
     const pnl = data.daily_pnl || 0;
     const pnlEl = document.getElementById('kpi-pnl');
-    const formattedPnl = Math.abs(pnl).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    pnlEl.innerText = `${pnl < 0 ? '-' : (pnl > 0 ? '+' : '')}$${formattedPnl}`;
-    pnlEl.style.color = pnl > 0 ? 'var(--accent-success)' : (pnl < 0 ? 'var(--accent-danger)' : 'var(--text-primary)');
-
-    if (document.getElementById('kpi-pnl-realized')) {
-      if (data.is_simulation) {
-        const realPnl = data.realized_pnl || 0;
-        const tradesCount = data.closed_trades || 0;
-        document.getElementById('kpi-pnl-realized').innerText = `Realizado: ${realPnl >= 0 ? '+' : ''}$${realPnl.toFixed(2)} (${tradesCount} trades)`;
-        document.getElementById('kpi-pnl-realized').style.color = realPnl >= 0 ? 'var(--accent-success)' : 'var(--accent-danger)';
-      } else {
-        document.getElementById('kpi-pnl-realized').innerText = 'Conectado a Alpaca Matching Engine';
-        document.getElementById('kpi-pnl-realized').style.color = 'var(--text-muted)';
-      }
+    if (pnlEl) {
+      const formattedPnl = Math.abs(pnl).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      pnlEl.innerText = `${pnl < 0 ? '-' : (pnl > 0 ? '+' : '')}$${formattedPnl}`;
+      pnlEl.style.color = pnl > 0 ? 'var(--accent-success)' : (pnl < 0 ? 'var(--accent-danger)' : 'var(--text-primary)');
     }
 
     const dd = data.daily_drawdown_pct || 0;
     const ddEl = document.getElementById('kpi-drawdown');
-    ddEl.innerText = `${dd.toFixed(2)}%`;
-    ddEl.style.color = dd > 2.0 ? 'var(--accent-danger)' : 'var(--text-primary)';
-
-    if (document.getElementById('kpi-winrate-sub')) {
-      const winRate = data.win_rate || 0;
-      document.getElementById('kpi-winrate-sub').innerText = `Win Rate: ${winRate.toFixed(1)}%`;
+    if (ddEl) {
+      ddEl.innerText = `${dd.toFixed(2)}%`;
+      ddEl.style.color = dd > 2.0 ? 'var(--accent-danger)' : 'var(--text-primary)';
     }
 
-    // Update Chart
+    // Update Chart with live point
     const nowTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     if (equityChartInstance) {
       if (equityChartInstance.data.labels.length === 0) {
@@ -286,28 +288,18 @@ async function fetchTelemetryData() {
         const dbBadge = document.getElementById('active-db-badge');
         const dbDot = document.getElementById('db-status-dot');
         if (dbBadge && dbDot) {
-          if (hData.neon_connected) {
-            dbDot.className = 'status-dot online';
-            dbBadge.innerText = 'DB: Neon PostgreSQL (Nube)';
-            dbBadge.style.color = 'var(--accent-success)';
-          } else {
-            dbDot.className = 'status-dot busy';
-            dbBadge.innerText = 'DB: Modo Offline';
-            dbBadge.style.color = 'var(--accent-warning)';
-          }
+          dbDot.className = hData.neon_connected ? 'status-dot online' : 'status-dot busy';
+          dbBadge.innerText = hData.neon_connected ? 'Neon Cloud' : 'DB Offline';
         }
       }
     } catch (_) {}
 
-    // Positions & Orders
-    fetchPositions();
-    fetchOrders();
   } catch (err) {
-    console.warn('Telemetry error:', err);
+    console.debug('Telemetry error:', err);
   }
 }
 
-// Fetch Positions
+// Fetch Active Positions
 async function fetchPositions() {
   try {
     const res = await fetch('/api/positions');
@@ -316,62 +308,85 @@ async function fetchPositions() {
 
     const tbody = document.getElementById('positions-table-body');
     const badge = document.getElementById('positions-count-badge');
-    badge.innerText = `${positions.length} Activas`;
+    if (badge) badge.innerText = `${positions.length} Activas`;
 
-    if (positions.length === 0) {
+    if (!tbody) return;
+    if (!Array.isArray(positions) || positions.length === 0) {
       tbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 32px;">No hay posiciones abiertas actualmente.</td></tr>`;
       return;
     }
 
     tbody.innerHTML = positions.map(p => {
       const pnlColor = p.unrealized_pnl >= 0 ? 'var(--accent-success)' : 'var(--accent-danger)';
+      const qtyStr = p.quantity < 0.01 
+        ? p.quantity.toFixed(6) 
+        : p.quantity.toLocaleString('en-US', { maximumFractionDigits: 4 });
+      const entryPrice = p.entry_price < 1 
+        ? `$${p.entry_price.toFixed(4)}` 
+        : `$${p.entry_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      const currentPrice = p.current_price < 1 
+        ? `$${p.current_price.toFixed(4)}` 
+        : `$${p.current_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
       return `
         <tr>
-          <td data-label="Activo"><span class="symbol-badge">${p.symbol}</span></td>
-          <td data-label="Tipo"><span class="badge ${p.asset_class === 'CRYPTO' ? 'badge-info' : 'badge-warning'}">${p.asset_class}</span></td>
-          <td data-label="Cantidad">${p.quantity.toFixed(4)}</td>
-          <td data-label="Entrada">$${p.entry_price.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-          <td data-label="Precio Actual">$${p.current_price.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-          <td data-label="P&L Flotante" style="color: ${pnlColor}; font-weight: 700;">
+          <td><span class="symbol-badge">${p.symbol}</span></td>
+          <td><span class="badge ${p.asset_class === 'CRYPTO' ? 'badge-info' : 'badge-warning'}">${p.asset_class}</span></td>
+          <td class="mono">${qtyStr}</td>
+          <td class="mono">${entryPrice}</td>
+          <td class="mono">${currentPrice}</td>
+          <td class="mono" style="color: ${pnlColor}; font-weight: 600;">
             ${p.unrealized_pnl >= 0 ? '+' : ''}$${p.unrealized_pnl.toFixed(2)} (${p.unrealized_pnl_pct.toFixed(2)}%)
           </td>
         </tr>
       `;
     }).join('');
   } catch (err) {
-    console.warn('Positions error:', err);
+    console.debug('Positions error:', err);
   }
 }
 
-// Fetch Orders
+// Fetch Executed Orders
 async function fetchOrders() {
   try {
     const res = await fetch('/api/orders');
     if (!res.ok) return;
     const orders = await res.json();
-    const tbody = document.getElementById('orders-table-body');
 
-    if (orders.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 32px;">No hay órdenes ejecutadas en esta sesión.</td></tr>`;
+    const tbody = document.getElementById('orders-table-body');
+    if (!tbody) return;
+
+    if (!Array.isArray(orders) || orders.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--text-muted); padding: 32px;">No hay órdenes registradas.</td></tr>`;
       return;
     }
 
-    tbody.innerHTML = orders.slice(0, 10).map(o => {
-      const isBuy = o.side === 'BUY';
+    tbody.innerHTML = orders.slice(0, 20).map(o => {
+      const isBuy = (o.side || '').toUpperCase() === 'BUY';
+      const sideColor = isBuy ? 'var(--accent-success)' : 'var(--accent-danger)';
+      const sideBadge = `<span class="badge" style="background: ${isBuy ? 'var(--accent-success-subtle)' : 'var(--accent-danger-subtle)'}; color: ${sideColor}; border-color: ${isBuy ? 'rgba(52, 211, 153, 0.25)' : 'rgba(248, 113, 113, 0.25)'};">${o.side}</span>`;
+      const price = o.filled_price 
+        ? `$${o.filled_price < 1 ? o.filled_price.toFixed(4) : o.filled_price.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` 
+        : (o.limit_price ? `$${o.limit_price}` : 'MKT');
+      const timeStr = o.created_at ? new Date(o.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-';
+      const qtyStr = o.quantity < 0.01 
+        ? o.quantity.toFixed(6) 
+        : o.quantity.toLocaleString('en-US', { maximumFractionDigits: 4 });
+
       return `
         <tr>
-          <td data-label="ID"><code>${o.order_id}</code></td>
-          <td data-label="Símbolo"><strong>${o.symbol}</strong></td>
-          <td data-label="Operación"><span class="badge ${isBuy ? 'badge-success' : 'badge-danger'}">${o.side}</span></td>
-          <td data-label="Cantidad">${o.quantity}</td>
-          <td data-label="Precio">$${(o.filled_price || o.limit_price || 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
-          <td data-label="Estado"><span class="status-dot ${o.status === 'FILLED' ? 'online' : 'busy'}" style="display:inline-block; margin-right:4px;"></span>${o.status}</td>
-          <td data-label="Hora">${o.created_at ? new Date(o.created_at).toLocaleTimeString() : '-'}</td>
+          <td class="mono" style="color: var(--text-muted); font-size: 11px;">${(o.order_id || '').slice(0, 8)}</td>
+          <td><span class="symbol-badge">${o.symbol}</span></td>
+          <td>${sideBadge}</td>
+          <td class="mono">${qtyStr}</td>
+          <td class="mono">${price}</td>
+          <td><span class="badge ${o.status === 'FILLED' ? 'badge-success' : 'badge-info'}">${o.status}</span></td>
+          <td class="mono" style="color: var(--text-muted); font-size: 11px;">${timeStr}</td>
         </tr>
       `;
     }).join('');
   } catch (err) {
-    console.warn('Orders error:', err);
+    console.debug('Orders error:', err);
   }
 }
 
@@ -380,358 +395,89 @@ async function fetchWatchlist() {
   try {
     const res = await fetch('/api/watchlist');
     if (!res.ok) return;
-    const data = await res.json();
+    const tickers = await res.json();
     const container = document.getElementById('watchlist-container');
-    const all = [...(data.equities || []), ...(data.crypto || [])];
-    container.innerHTML = all.map(sym => `
-      <span class="tag-item">● ${sym}</span>
-    `).join('');
+    if (container && Array.isArray(tickers) && tickers.length > 0) {
+      container.innerHTML = tickers.map(t => `<span class="tag-item">${t}</span>`).join('');
+    }
   } catch (err) {
-    console.warn('Watchlist error:', err);
+    console.debug('Watchlist note:', err);
   }
 }
 
-async function addWatchlist() {
-  const input = document.getElementById('new-ticker-input');
-  const symbol = input.value.trim().toUpperCase();
-  if (!symbol) return;
-  await fetch('/api/watchlist', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'add', symbol }),
-  });
-  input.value = '';
-  fetchWatchlist();
-}
-
-async function removeWatchlist(symbol) {
-  await fetch('/api/watchlist', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'remove', symbol }),
-  });
-  fetchWatchlist();
-}
-
-// Fetch Logs for Terminal
+// Terminal Logging Stream
 async function fetchLogs() {
   try {
     const res = await fetch(`/api/logs?filter=${currentTab}`);
     if (!res.ok) return;
     const logs = await res.json();
+
     const container = document.getElementById('terminal-logs');
-    if (logs && logs.length > 0) {
-      container.innerHTML = logs.map(l => formatLogLine(l)).join('');
-      container.scrollTop = container.scrollHeight;
+    if (!container) return;
+
+    if (!Array.isArray(logs) || logs.length === 0) {
+      container.innerHTML = `<div class="log-entry"><span class="log-time">[${new Date().toLocaleTimeString()}]</span><span class="log-info">Esperando eventos del motor autónomo...</span></div>`;
+      return;
     }
+
+    container.innerHTML = logs.map(line => {
+      let cssClass = 'log-info';
+      if (line.includes('[ERROR]') || line.includes('❌') || line.includes('REJECTED')) {
+        cssClass = 'log-error';
+      } else if (line.includes('[WARNING]') || line.includes('⚠️')) {
+        cssClass = 'log-warning';
+      }
+
+      return `<div class="log-entry"><span class="${cssClass}">${line}</span></div>`;
+    }).join('');
+
+    container.scrollTop = container.scrollHeight;
   } catch (err) {
-    console.warn('Logs error:', err);
+    console.debug('Logs note:', err);
   }
-}
-
-function formatLogLine(log) {
-  let contentClass = 'log-info';
-  if (log.includes('Bull')) contentClass = 'log-bull';
-  else if (log.includes('Bear')) contentClass = 'log-bear';
-  else if (log.includes('FILLED') || log.includes('BUY')) contentClass = 'log-action';
-  else if (log.includes('REJECTED')) contentClass = 'log-bear';
-
-  return `<div class="log-entry"><span class="log-time">[${new Date().toLocaleTimeString()}]</span> <span class="${contentClass}">${log}</span></div>`;
 }
 
 function switchTerminalTab(tab) {
   currentTab = tab;
-  document.querySelectorAll('.terminal-tab').forEach(t => t.classList.remove('active'));
-  if (event && event.target) event.target.classList.add('active');
+  document.querySelectorAll('.terminal-tab').forEach(b => b.classList.remove('active'));
+  event.target.classList.add('active');
   fetchLogs();
 }
 
 function clearTerminal() {
-  document.getElementById('terminal-logs').innerHTML = '';
+  const container = document.getElementById('terminal-logs');
+  if (container) container.innerHTML = '';
 }
 
-// Actions
-async function triggerManualTrade() {
-  const symbol = document.getElementById('manual-symbol').value.trim().toUpperCase();
-  if (!symbol) {
-    alert('Introduce un símbolo válido (ej: NVDA)');
-    return;
-  }
-  document.getElementById('bot-status-text').innerText = `Analizando ${symbol}...`;
-  document.getElementById('bot-status-dot').className = 'status-dot busy';
-
-  const res = await fetch('/api/trade', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ symbol })
-  });
-  const data = await res.json();
-  alert(data.message || 'Ciclo de trading iniciado.');
-  fetchTelemetryData();
-}
-
+// Full Scan & Kill Switch Triggers
 async function triggerFullScan() {
-  if (!confirm('¿Deseas iniciar un escaneo completo de todos los activos de la cartera?')) return;
-  document.getElementById('bot-status-text').innerText = 'Escaneando Cartera...';
-  document.getElementById('bot-status-dot').className = 'status-dot busy';
-
-  const res = await fetch('/api/scan', { method: 'POST' });
-  const data = await res.json();
-  alert(data.message || 'Escaneo iniciado en segundo plano.');
-}
-
-async function triggerKillSwitch() {
-  if (!confirm('🚨 ATENCIÓN: El Kill Switch cancelará todas las órdenes pendientes y detendrá las compras. ¿Confirmar?')) return;
-  const res = await fetch('/api/kill-switch', { method: 'POST' });
-  const data = await res.json();
-  alert(data.message || 'Kill switch activado.');
-  fetchTelemetryData();
-}
-
-// Settings Modal
-function openSettingsModal() {
-  document.getElementById('settings-modal').classList.add('open');
-}
-
-function closeSettingsModal() {
-  document.getElementById('settings-modal').classList.remove('open');
-}
-
-async function saveSettings() {
-  const geminiKey = document.getElementById('cfg-gemini-key').value.trim();
-  const openrouterKey = document.getElementById('cfg-openrouter-key').value.trim();
-  const groqKey = document.getElementById('cfg-groq-key').value.trim();
-  const mistralKey = document.getElementById('cfg-mistral-key').value.trim();
-  const provider = document.getElementById('cfg-provider-select').value;
-  const riskTrade = parseFloat(document.getElementById('cfg-risk-trade').value);
-  const maxDrawdown = parseFloat(document.getElementById('cfg-max-drawdown').value);
-
-  const payload = {
-    llm_provider: provider,
-    max_risk_per_trade_pct: riskTrade,
-    max_daily_drawdown_pct: maxDrawdown,
-  };
-  if (geminiKey) payload.google_api_key = geminiKey;
-  if (openrouterKey) payload.openrouter_api_key = openrouterKey;
-  if (groqKey) payload.groq_api_key = groqKey;
-  if (mistralKey) payload.mistral_api_key = mistralKey;
-
-  const res = await fetch('/api/settings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload)
-  });
-  const data = await res.json();
-  alert(data.message || 'Configuración actualizada.');
-  closeSettingsModal();
-  document.getElementById('active-model-badge').innerText = `LLM: ${provider === 'rotator' ? 'Pool Rotativo' : (provider === 'google' ? 'Google Gemini' : 'OpenRouter')}`;
-}
-
-// Live Simulation Toggle
-async function toggleSimulation() {
-  const btn = document.getElementById('btn-toggle-sim');
-  const res = await fetch('/api/simulation/toggle', { method: 'POST' });
-  const data = await res.json();
-  updateSimulationUI(data.running);
-}
-
-// Reset Simulation Account
-async function resetSimulation() {
-  if (!confirm('¿Deseas reiniciar la cartera de simulación a $100,000.00 USD con saldo limpio?')) return;
-  const res = await fetch('/api/simulation/reset', { method: 'POST' });
-  const data = await res.json();
-  alert(data.message || 'Simulación reiniciada.');
-  fetchTelemetryData();
-  fetchLogs();
-}
-
-function updateSimulationUI(isRunning) {
-  const btn = document.getElementById('btn-toggle-sim');
-  const badge = document.getElementById('active-broker-badge');
-  const statusDot = document.getElementById('bot-status-dot');
-  const statusText = document.getElementById('bot-status-text');
-
-  if (isRunning) {
-    btn.innerText = '⏸️ Pausar Simulación';
-    btn.className = 'btn btn-danger';
-    badge.innerText = 'Broker: Simulación Activa (Sin API)';
-    statusDot.className = 'status-dot busy';
-    statusText.innerText = 'Simulación Operando';
-  } else {
-    btn.innerText = '▶️ Simulación en Vivo';
-    btn.className = 'btn btn-primary';
-    badge.innerText = 'Broker: Alpaca (Paper)';
-    statusDot.className = 'status-dot online';
-    statusText.innerText = 'Server Activo';
-  }
-}
-
-// ==============================================================================
-// MOBILE NAVIGATION CONTROLLER & VIEW SWITCHER
-// ==============================================================================
-
-function switchMobileView(viewName) {
-  // Update bottom navigation bar button states
-  document.querySelectorAll('.mobile-bottom-nav .mobile-nav-btn').forEach(btn => {
-    btn.classList.remove('active');
-  });
-  const targetNavBtn = document.getElementById(`mob-nav-${viewName}`);
-  if (targetNavBtn) targetNavBtn.classList.add('active');
-
-  // In mobile viewports (< 768px), toggle specific view section
-  if (window.innerWidth <= 768) {
-    const panes = ['portfolio', 'orders', 'agents'];
-    panes.forEach(pane => {
-      const el = document.getElementById(`view-${pane}`);
-      if (el) {
-        if (pane === viewName) {
-          el.classList.add('active');
-        } else {
-          el.classList.remove('active');
-        }
-      }
-    });
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  }
-}
-
-window.addEventListener('resize', () => {
-  if (window.innerWidth > 768) {
-    document.querySelectorAll('.mobile-view-pane').forEach(el => el.classList.add('active'));
-  } else {
-    const activeBtn = document.querySelector('.mobile-bottom-nav .mobile-nav-btn.active');
-    const view = activeBtn ? activeBtn.id.replace('mob-nav-', '') : 'portfolio';
-    switchMobileView(view);
-  }
-});
-
-// ==============================================================================
-// NOTIFICATIONS, TOASTS & AUDIO CHIME SYSTEM
-// ==============================================================================
-
-let lastSeenNotifId = null;
-let unreadNotifCount = 0;
-let audioAlertsEnabled = localStorage.getItem('audio_alerts') !== 'false';
-
-function toggleAudioAlerts(enabled) {
-  audioAlertsEnabled = enabled;
-  localStorage.setItem('audio_alerts', enabled ? 'true' : 'false');
-  if (enabled) playChime();
-}
-
-function playChime() {
-  if (!audioAlertsEnabled) return;
   try {
-    const AudioCtx = window.AudioContext || window.webkitAudioContext;
-    if (!AudioCtx) return;
-    const ctx = new AudioCtx();
-    const now = ctx.currentTime;
-
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(587.33, now); // D5
-    osc.frequency.exponentialRampToValueAtTime(880.00, now + 0.12); // A5
-
-    gain.gain.setValueAtTime(0.12, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.45);
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-
-    osc.start(now);
-    osc.stop(now + 0.5);
+    const btn = document.querySelector('.header-btn-scan');
+    if (btn) btn.innerText = 'Escaneando...';
+    await fetch('/api/scan/trigger', { method: 'POST' });
+    setTimeout(() => {
+      if (btn) btn.innerText = 'Escanear';
+      fetchLogs();
+      fetchPositions();
+    }, 2000);
   } catch (_) {}
 }
 
-function showToast(title, message, icon = '⚡', type = 'ORDER_BUY') {
-  const container = document.getElementById('toast-container');
-  if (!container) return;
-
-  playChime();
-
-  const toast = document.createElement('div');
-  toast.className = `toast-card toast-${type}`;
-  toast.innerHTML = `
-    <div class="toast-icon">${icon}</div>
-    <div class="toast-body">
-      <div class="toast-title">${title}</div>
-      <div class="toast-message">${message}</div>
-      <div class="toast-time">Ahora</div>
-    </div>
-    <button class="toast-close" onclick="this.parentElement.remove()">✕</button>
-  `;
-
-  container.appendChild(toast);
-  requestAnimationFrame(() => toast.classList.add('show'));
-
-  // Native browser push notification if permission granted
-  if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+async function triggerKillSwitch() {
+  if (confirm('¿Detener el motor autónomo inmediatamente?')) {
     try {
-      new Notification(`TradingAgents: ${title}`, {
-        body: message,
-        icon: '/static/favicon.ico',
-        tag: `ta-${Date.now()}`,
-      });
+      await fetch('/api/kill-switch', { method: 'POST' });
+      alert('Motor detenido con éxito.');
+      window.location.reload();
     } catch (_) {}
   }
-
-  setTimeout(() => {
-    toast.classList.remove('show');
-    toast.classList.add('hide');
-    setTimeout(() => toast.remove(), 400);
-  }, 4500);
 }
 
-function checkNotificationPermissionUI() {
-  const btn = document.getElementById('btn-request-push');
-  if (!btn) return;
-  if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-    btn.innerText = '✅ Notificaciones Activas';
-    btn.className = 'btn btn-secondary';
-    btn.disabled = true;
-  }
-}
-
-async function enablePushNotifications() {
-  if (typeof Notification === 'undefined') {
-    alert('Las notificaciones Web no están soportadas en este navegador.');
-    return;
-  }
-  const perm = await Notification.requestPermission();
-  checkNotificationPermissionUI();
-  if (perm === 'granted') {
-    showToast('Notificaciones Nativas Habilitadas', 'Recibirás avisos en tu pantalla de bloqueo y barra de estado.', '🔔', 'TEST_ALERT');
-  } else {
-    alert('Permiso de notificaciones no concedido. Puedes habilitarlo en los ajustes del navegador.');
-  }
-}
-
+// Notification Drawer & Modals
 function toggleNotificationsModal() {
   const modal = document.getElementById('notifications-modal');
-  if (!modal) return;
-  const isHidden = modal.style.display === 'none' || !modal.style.display;
-  modal.style.display = isHidden ? 'flex' : 'none';
-
-  if (isHidden) {
-    unreadNotifCount = 0;
-    updateBadgeUI();
-    fetchNotifications();
-  }
-}
-
-function updateBadgeUI() {
-  const badge = document.getElementById('notif-badge-count');
-  const mobBadge = document.getElementById('mobile-badge-count');
-  const txt = unreadNotifCount > 9 ? '9+' : `${unreadNotifCount}`;
-  if (badge) {
-    badge.innerText = txt;
-    badge.style.display = unreadNotifCount > 0 ? 'flex' : 'none';
-  }
-  if (mobBadge) {
-    mobBadge.innerText = txt;
-    mobBadge.style.display = unreadNotifCount > 0 ? 'flex' : 'none';
+  if (modal) {
+    modal.style.display = modal.style.display === 'none' ? 'flex' : 'none';
   }
 }
 
@@ -739,78 +485,59 @@ async function fetchNotifications() {
   try {
     const res = await fetch('/api/notifications');
     if (!res.ok) return;
-    const events = await res.json();
+    const notifs = await res.json();
+    const countBadge = document.getElementById('notif-badge-count');
+    const mobCount = document.getElementById('mobile-badge-count');
+    if (countBadge) countBadge.innerText = (notifs || []).length;
+    if (mobCount) mobCount.innerText = (notifs || []).length;
+
     const feed = document.getElementById('notifications-feed');
-
-    if (!events || events.length === 0) {
-      if (feed) feed.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 24px;">No hay eventos recientes.</div>';
-      return;
+    if (feed && Array.isArray(notifs)) {
+      if (notifs.length === 0) {
+        feed.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 16px;">Sin notificaciones recientes</div>';
+        return;
+      }
+      feed.innerHTML = notifs.map(n => `
+        <div style="padding: 10px; background: #141416; border: 1px solid var(--border-subtle); border-radius: 4px; margin-bottom: 6px;">
+          <div style="font-weight: 600; font-size: 12px; color: #ffffff;">${n.title}</div>
+          <div style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">${n.message}</div>
+          <div style="font-size: 10px; color: var(--text-muted); margin-top: 4px; font-family: var(--font-mono);">${new Date(n.timestamp).toLocaleTimeString()}</div>
+        </div>
+      `).join('');
     }
+  } catch (_) {}
+}
 
-    // Check for new incoming notifications to trigger toast
-    if (lastSeenNotifId && events.length > 0 && events[0].id !== lastSeenNotifId) {
-      const newest = events[0];
-      unreadNotifCount += 1;
-      updateBadgeUI();
-      showToast(newest.title, newest.message, newest.icon || '⚡', newest.type);
-    }
-    lastSeenNotifId = events[0].id;
-
-    if (feed) {
-      feed.innerHTML = events.map(ev => {
-        const timeStr = ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-';
-        return `
-          <div class="notif-item">
-            <span class="notif-item-icon">${ev.icon || '⚡'}</span>
-            <div class="notif-item-body">
-              <div class="notif-item-title">${ev.title}</div>
-              <div class="notif-item-msg">${ev.message}</div>
-              <div class="notif-item-time">${timeStr}</div>
-            </div>
-          </div>
-        `;
-      }).join('');
-    }
-  } catch (err) {
-    console.debug('Notification fetch note:', err);
+function checkNotificationPermissionUI() {
+  if ('Notification' in window && Notification.permission === 'granted') {
+    const btn = document.getElementById('btn-request-push');
+    if (btn) btn.innerText = 'Activo';
   }
 }
 
-async function triggerTestNotification() {
-  try {
-    const res = await fetch('/api/notifications/test', { method: 'POST' });
-    const data = await res.json();
-    if (data.event) {
-      showToast(data.event.title, data.event.message, data.event.icon, data.event.type);
-      fetchNotifications();
-    }
-  } catch (e) {
-    showToast('Prueba de Alerta Local', 'Sistema de notificaciones verificado en pantalla.', '🔔', 'TEST_ALERT');
+function enablePushNotifications() {
+  if ('Notification' in window) {
+    Notification.requestPermission().then(permission => {
+      if (permission === 'granted') {
+        alert('Notificaciones push activadas con éxito.');
+        checkNotificationPermissionUI();
+      }
+    });
   }
 }
 
-async function saveTelegramSettings() {
-  const token = document.getElementById('input-tg-token').value.trim();
-  const chat = document.getElementById('input-tg-chat').value.trim();
-  if (!token && !chat) {
-    alert('Ingresa el token y chat ID de Telegram.');
-    return;
-  }
-  const res = await fetch('/api/settings', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      telegram_bot_token: token || undefined,
-      telegram_chat_id: chat || undefined,
-    }),
-  });
-  const data = await res.json();
-  showToast('Telegram Configurado', 'Credenciales actualizadas para alertas 24/7.', '📱', 'TEST_ALERT');
-  const badge = document.getElementById('telegram-status-badge');
-  if (badge) {
-    badge.innerText = 'Conectado';
-    badge.className = 'badge badge-success';
-  }
+function toggleAudioAlerts(enabled) {
+  localStorage.setItem('TRADINGAGENTS_AUDIO_ENABLED', enabled ? '1' : '0');
 }
 
-document.addEventListener('DOMContentLoaded', checkSimulationStatus);
+// Mobile View Switcher
+function switchMobileView(view) {
+  document.querySelectorAll('.mobile-nav-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.mobile-view-pane').forEach(p => p.classList.remove('active'));
+
+  const navBtn = document.getElementById(`mob-nav-${view}`);
+  if (navBtn) navBtn.classList.add('active');
+
+  const pane = document.getElementById(`view-${view}`);
+  if (pane) pane.classList.add('active');
+}
