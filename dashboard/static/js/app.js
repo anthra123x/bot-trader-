@@ -203,10 +203,18 @@ async function fetchTelemetryData() {
     if (!res.ok) return;
     const data = await res.json();
 
-    // KPIs
-    document.getElementById('kpi-equity').innerText = `$${data.equity.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
-    document.getElementById('kpi-buying-power').innerText = `$${data.buying_power.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
-    document.getElementById('kpi-cash-sub').innerText = `Cash: $${data.cash.toLocaleString('en-US', { minimumFractionDigits: 2 })}`;
+    if (data.error || typeof data.equity !== 'number') {
+      const badge = document.getElementById('active-backend-badge');
+      const dot = document.getElementById('backend-status-dot');
+      if (badge) {
+        badge.innerText = '⚠️ Conectar Backend';
+        badge.title = `El backend actual no responde correctamente (${data.error || 'sin datos'}). Haz clic aquí para ingresar la URL de tu servicio Render.`;
+        badge.style.color = 'var(--accent-warning)';
+      }
+      if (dot) dot.className = 'status-dot offline';
+      return;
+    }
+
     
     const badge = document.getElementById('active-broker-badge');
     if (badge) {
