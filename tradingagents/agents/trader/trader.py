@@ -37,17 +37,26 @@ def create_trader(llm):
                 "Ground concrete price levels (entry, stop-loss, position sizing) in the technical "
                 "market report's price structure -- current price, support/resistance, ATR, and "
                 "volatility -- and use the research plan for direction and strategy. "
+                "Enforce mathematical risk/reward convexity: only propose Buy when expected profit target "
+                "offers at least 2.0x the distance to stop-loss ((Target - Entry) / (Entry - StopLoss) >= 2.0). "
+                "Place stop-loss beyond normal market volatility noise using ATR and local swing support. "
+                "If favorable 2:1 asymmetry is absent or risk is unquantifiable, recommend Hold. "
+                "Respect the Real-Time Market Research Specialist directive in portfolio context: under CAUTION "
+                "status, scale sizing down to 50%; under IMPRUDENT status, recommend Hold. "
             )
             report_section = f"Technical Market Report:\n{market_report}\n\n"
         else:
-            grounding = ""
+            grounding = (
+                "Enforce convex risk/reward: only propose Buy when upside potential is at least twice the downside risk. "
+                "Otherwise recommend Hold. "
+            )
             report_section = ""
 
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "You are a trading agent analyzing market data to make investment decisions. "
+                    "You are an elite quantitative trading agent formulating institutional transaction proposals. "
                     "Based on your analysis, provide a specific recommendation to buy, sell, or hold. "
                     + grounding
                     # Entry/stop are numeric price fields. Asking for concrete

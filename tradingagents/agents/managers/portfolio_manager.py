@@ -39,7 +39,7 @@ def create_portfolio_manager(llm):
             else ""
         )
 
-        prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
+        prompt = f"""As the Portfolio Manager and Chief Investment Officer, synthesize the risk analysts' debate and deliver the authoritative final trading decision.
 
 {instrument_context}
 
@@ -48,11 +48,11 @@ def create_portfolio_manager(llm):
 ---
 
 **Rating Scale** (use exactly one):
-- **Buy**: Strong conviction to enter or add to position
-- **Overweight**: Favorable outlook, gradually increase exposure
-- **Hold**: Maintain current position, no action needed
-- **Underweight**: Reduce exposure, take partial profits
-- **Sell**: Exit position or avoid entry
+- **Buy**: Strong institutional conviction; convex risk/reward justified by empirical confluence
+- **Overweight**: Constructive view; gradually increase exposure with disciplined risk limits
+- **Hold**: Maintain current position, no action needed, or insufficient edge to risk capital. Conflicting arguments alone are not a reason to Hold: commit to the stronger side, sized by how decisively it wins. Choose Hold only when the evidence is still balanced after weighing, or too thin to support a call.
+- **Underweight**: Reduce exposure, harvest partial profits, or de-risk ahead of adverse catalysts
+- **Sell**: Exit position completely or avoid entry due to structural downside
 
 **Context:**
 - Research Manager's investment plan: **{research_plan}**
@@ -63,15 +63,19 @@ def create_portfolio_manager(llm):
 
 ---
 
-Ground every conclusion in specific evidence from the analysts. The risk debate always contains conflicting stances; deciding which is stronger is the job, so conflict alone is not a reason to Hold. Commit to the stronger case, sized by how decisively it wins. Choose Hold only when the evidence is still balanced after that weighing, or too thin to support a call; do not force a direction to appear decisive. Weigh the analysts on their merits, independent of speaking order.
+### Executive Institutional Decision Protocol:
+1. **Market Prudence & Macro Alignment**: You MUST align with the Real-Time Market Research Specialist directive in the portfolio context. If the market is marked as IMPRUDENT_ADVERSE_VETO, veto Buy/Overweight calls and enforce Hold/Sell to preserve 100% cash liquidity. Under CAUTION status, cap sizing and enforce defensive risk buffers.
+2. **Asymmetric Risk/Reward Verification**: Audit the Trader's proposal. Only approve a Buy if the setup demonstrates an asymmetric reward-to-risk ratio (minimum 2:1 R:R) with a verifiable target price and an explicit numerical invalidation level.
+3. **Past Mistake & Pattern Immunity**: Cross-examine the proposed trade against the lessons from prior trades ({lessons_line}). Actively reject setups that mimic known failure modes (e.g. overbought bull traps, choppy range breakdowns, catching falling knives).
+4. **Capital Preservation Mandate**: When the risk analysts present valid unhedged downside or conflicting macro evidence, prioritize capital safety over speculative FOMO. A decision to Hold with zero capital loss is superior to an impulsive loss.
 
 ## Output
 
 Write these sections, in this order, starting with the rating on its own line:
 
 - **Rating**: exactly one of Buy / Overweight / Hold / Underweight / Sell
-- **Executive Summary**: the call and how to act on it
-- **Investment Thesis**: the evidence that decided it, and what would change it
+- **Executive Summary**: the definitive call, execution parameters, invalidation level, and sizing guidance
+- **Investment Thesis**: the core quantitative and risk evidence that decided it, incorporating prior lessons and what conditions would invalidate the thesis
 
 {NO_EXTERNAL_TOOLS}{get_language_instruction()}"""
 

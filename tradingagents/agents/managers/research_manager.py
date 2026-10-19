@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from tradingagents.agents.context import get_instrument_context_from_state, get_language_instruction
+from tradingagents.agents.context import (
+    get_instrument_context_from_state,
+    get_language_instruction,
+    get_portfolio_context_from_state,
+    report_or_absent,
+)
 from tradingagents.agents.schemas import ResearchPlan, render_research_plan
 from tradingagents.agents.structured import (
     NO_EXTERNAL_TOOLS,
@@ -16,24 +21,40 @@ def create_research_manager(llm):
 
     def research_manager_node(state) -> dict:
         instrument_context = get_instrument_context_from_state(state)
+        portfolio_context = get_portfolio_context_from_state(state)
+        market_report = report_or_absent(state.get("market_report"), "market")
+        sentiment_report = report_or_absent(state.get("sentiment_report"), "sentiment")
+        news_report = report_or_absent(state.get("news_report"), "news")
+        fundamentals_report = report_or_absent(state.get("fundamentals_report"), "fundamentals")
         history = state["investment_debate_state"].get("history", "")
 
         investment_debate_state = state["investment_debate_state"]
 
-        prompt = f"""As the Research Manager and debate facilitator, your role is to critically evaluate this round of debate and deliver a clear, actionable investment plan for the trader.
+        prompt = f"""As the Research Manager and Chief Investment Strategist, your role is to critically synthesize the bull/bear debate and deliver a rigorous, evidence-based investment plan for the trader.
 
 {instrument_context}
+
+{portfolio_context}
+
+### Core Intelligence Reports:
+- Technical Market Structure: {market_report}
+- Global News & Catalysts: {news_report}
+- Social Sentiment Dynamics: {sentiment_report}
+- Fundamentals Analysis: {fundamentals_report}
 
 ---
 
 **Rating Scale** (use exactly one):
-- **Buy**: Strong conviction in the bull thesis; recommend taking or growing the position
-- **Overweight**: Constructive view; recommend gradually increasing exposure
-- **Hold**: Balanced view; recommend maintaining the current position
-- **Underweight**: Cautious view; recommend trimming exposure
+- **Buy**: Strong conviction in the bull thesis backed by empirical confluence; recommend taking or growing position
+- **Overweight**: Constructive view; recommend gradually increasing exposure with prudent sizing
+- **Hold**: Balanced view or lack of directional edge. Conflicting arguments alone are not a reason to Hold: commit to the stronger side, sized by how decisively it wins. Choose Hold only when the evidence is still balanced after weighing, or too thin to support a call.
+- **Underweight**: Cautious view, fading momentum, or emerging risks; recommend trimming exposure
 - **Sell**: Strong conviction in the bear thesis; recommend exiting or avoiding the position
 
-The debate always contains conflicting arguments; deciding which side is stronger is the job, so conflict alone is not a reason to Hold. Commit to the side with the stronger case, sized by how decisively it wins. Choose Hold only when the evidence is still balanced after that weighing, or too thin to support a call; do not manufacture a direction to appear decisive. Weigh the bull and bear cases on their merits, independent of which side spoke first or last.
+### Strategic Evaluation Protocols:
+1. **Real-Time Market Prudence**: Respect the Real-Time Market Research Specialist directive provided in the portfolio context. If the market is in CAUTION or IMPRUDENT status, do not issue an unhedged Buy; moderate to Hold or Overweight with defensive sizing.
+2. **Empirical Edge Over Rhetoric**: The debate contains opposing arguments. Weigh evidence based on verifiable support/resistance levels, volume, and macro trend rather than speculative enthusiasm.
+3. **Asymmetric Risk/Reward Focus**: Demand that strategic actions target an asymmetric reward-to-risk profile (minimum 2:1 R:R) and specify clear invalidation conditions.
 
 ---
 
@@ -45,8 +66,8 @@ The debate always contains conflicting arguments; deciding which side is stronge
 Write these sections, in this order, starting with the recommendation on its own line:
 
 - **Recommendation**: exactly one of Buy / Overweight / Hold / Underweight / Sell
-- **Rationale**: which arguments decided it
-- **Strategic Actions**: concrete steps for the trader, sized against a standard allocation
+- **Rationale**: which arguments and empirical evidence decided it
+- **Strategic Actions**: concrete steps for the trader, sized against risk conditions (entry zone, R:R target, invalidation level)
 
 {NO_EXTERNAL_TOOLS}""" + get_language_instruction()
 
