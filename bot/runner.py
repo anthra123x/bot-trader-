@@ -17,6 +17,7 @@ from bot.config import BOT_CONFIG, BotConfig
 from bot.database.neon_repo import NeonRepository, get_neon_repo
 from bot.models import (
     AssetClass,
+    EnhancedPortfolioContext,
     Order,
     OrderSide,
     OrderStatus,
@@ -51,15 +52,15 @@ class BotRunner:
             discord_webhook=self.config.discord_webhook_url,
         )
 
-        # Specialized graphs: crypto runs focused technicals/market analysis (avoids SEC EDGAR 404s and rate-limit bloat)
+        # Specialized graphs: crypto runs technicals + social sentiment (Reddit/StockTwits); equities add fundamentals
         debug_mode = os.getenv("TRADINGAGENTS_DEBUG", "false").lower() in ("true", "1")
         self.crypto_graph = TradingAgentsGraph(
-            selected_analysts=["market"],
+            selected_analysts=["market", "social"],
             debug=debug_mode,
             config=self.config.tradingagents_config,
         )
         self.equity_graph = TradingAgentsGraph(
-            selected_analysts=["market", "fundamentals"],
+            selected_analysts=["market", "fundamentals", "social"],
             debug=debug_mode,
             config=self.config.tradingagents_config,
         )
@@ -194,10 +195,10 @@ class BotRunner:
 
         is_crypto = self.identify_asset_class(symbol) == AssetClass.CRYPTO
         asset_type = "crypto" if is_crypto else "stock"
-        # Build live PortfolioContext so subagents reason with real account positions and cash
+        # Build live EnhancedPortfolioContext so subagents reason with real account positions, cash, quant metrics & lessons
         portfolio_ctx = None
         try:
-            from tradingagents.portfolio import PortfolioContext, Position as PortfolioPosition
+            from tradingagents.portfolio import Position as PortfolioPosition
             bal = self.broker.get_account_balance()
             active_pos = self.broker.get_positions()
 
@@ -215,13 +216,55 @@ class BotRunner:
                 )
                 for p in active_pos
             ]
-            portfolio_ctx = PortfolioContext(
+
+            # Gather Macroeconomic Regime & Web Sentiment
+            regime_text = ""
+            reg_obj = None
+            try:
+                from bot.risk.regime_specialist import REGIME_SPECIALIST
+                reg_obj = REGIME_SPECIALIST.analyze_market_regime(symbol)
+                regime_text = f"- Regime: {reg_obj.regime_display} (Vol Score: {reg_obj.volatility_score:.1f}/100, ATR Ratio: {reg_obj.atr_ratio_90d:.2f}x)"
+                if reg_obj.web_sentiment:
+                    regime_text += f"\n- Web Sentiment: {reg_obj.web_sentiment.sentiment_label} (Fear & Greed Index: {reg_obj.web_sentiment.fear_greed_value}/100, Trend Bias: {reg_obj.trend_bias})"
+            except Exception:
+                pass
+
+            # Gather Quantitative Screener Telemetry
+            quant_text = (
+                f"- Quantitative Setup: {screen_res.setup_name} (Bias: {screen_res.bias}, Score: {screen_res.score:.0f}/100)\n"
+                f"- Technical Indicators: RSI(14)={screen_res.metrics.get('rsi')}, ATR%={screen_res.metrics.get('atr')}, Bollinger Bandwidth={screen_res.metrics.get('band_pct')}\n"
+                f"- Mathematical Risk/Reward: {screen_res.risk_reward_ratio:.2f}:1 (Suggested SL: ${screen_res.suggested_stop_loss:.2f}, TP: ${screen_res.suggested_take_profit:.2f})\n"
+                f"- Screener Consensus Rationale: {screen_res.rationale}"
+            )
+
+            # Gather Continuous Learning Lessons from Pattern Memory
+            lessons_text = ""
+            try:
+                pat_check = self.risk_engine.pattern_memory.query_matching_patterns(
+                    symbol=symbol,
+                    side=OrderSide.BUY if screen_res.bias == "BUY" else OrderSide.SELL,
+                    rsi=float(screen_res.metrics.get("rsi") or 50.0),
+                    ema_ratio=1.0,
+                    atr_pct=float(screen_res.metrics.get("atr") or 2.0),
+                    market_regime=reg_obj.regime.value if reg_obj else "STABLE",
+                )
+                if pat_check.warning_message:
+                    lessons_text = f"- ⚠️ Caution (Pattern Match): {pat_check.warning_message}. Lesson: {pat_check.learned_lesson}"
+                else:
+                    lessons_text = "- No recent recurring loss patterns detected for this setup. Maintain strict Stop-Loss discipline and capital preservation."
+            except Exception:
+                lessons_text = "- Maintain strict risk discipline."
+
+            portfolio_ctx = EnhancedPortfolioContext(
                 cash=bal.cash,
                 currency=bal.currency or "USD",
                 positions=port_positions,
+                regime_context=regime_text,
+                quant_context=quant_text,
+                lessons_context=lessons_text,
             )
         except Exception as pe:
-            logger.debug("Could not construct PortfolioContext for graph: %s", pe)
+            logger.debug("Could not construct EnhancedPortfolioContext for graph: %s", pe)
 
         try:
             final_state, rating = graph.propagate(symbol, date, asset_type=asset_type, portfolio=portfolio_ctx)

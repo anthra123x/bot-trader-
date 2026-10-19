@@ -150,3 +150,27 @@ class PatternCheckResult(BaseModel):
     similarity_score: float = 0.0
     warning_message: str | None = None
     learned_lesson: str | None = None
+
+
+from tradingagents.portfolio import PortfolioContext
+
+
+class EnhancedPortfolioContext(PortfolioContext):
+    """Augmented portfolio context for decision and risk agents, including macro regime, quant screener, and continuous learning lessons."""
+    quant_context: str = ""
+    regime_context: str = ""
+    lessons_context: str = ""
+
+    def render(self, ticker: str) -> str:
+        base = super().render(ticker)
+        extra = []
+        if self.regime_context:
+            extra.append(f"\nMacroeconomic Regime & Market Sentiment:\n{self.regime_context}")
+        if self.quant_context:
+            extra.append(f"\nQuantitative Screener Telemetry:\n{self.quant_context}")
+        if self.lessons_context:
+            extra.append(f"\nContinuous Learning - Lessons From Prior Trades:\n{self.lessons_context}")
+        if extra:
+            return base + "\n" + "\n".join(extra)
+        return base
+
