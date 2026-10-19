@@ -41,7 +41,14 @@ _FOREX_CURRENCIES = frozenset(
 
 # Crypto bases that brokers quote against USD without a separator.
 _CRYPTO_BASES = frozenset(
-    {"BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "BCH", "DOT", "AVAX", "LINK"}
+    {
+        "BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LTC", "BCH", "DOT", "AVAX", "LINK",
+        "AAVE", "NEAR", "UNI", "SUI", "APT", "RENDER", "ICP", "PEPE", "SHIB", "ATOM",
+        "XLM", "ARB", "OP", "TIA", "FET", "INJ", "ALGO", "MATIC", "POL", "FTM",
+        "SAND", "MANA", "GALA", "CRV", "MKR", "SNX", "LDO", "GRT", "DYDX", "IMX",
+        "STX", "RUNE", "KAS", "FLOKI", "BONK", "WIF", "JUP", "PYTH", "ONDO", "ENA",
+        "PENDLE", "TON", "BNB", "TRX", "HBAR", "KAVA", "VET", "FIL", "THETA", "EOS",
+    }
 )
 
 # Explicit aliases for instruments whose broker symbol does not map to a
@@ -86,11 +93,14 @@ def crypto_base(raw: str) -> str | None:
     """
     if not isinstance(raw, str):
         return None
-    compact = raw.strip().upper().rstrip("+").replace("-", "")
+    compact = raw.strip().upper().rstrip("+")
+    has_separator = "-" in compact or "/" in compact
+    clean = compact.replace("-", "").replace("/", "")
     for quote in _CRYPTO_QUOTES:
-        if compact.endswith(quote):
-            base = compact[: -len(quote)]
-            return base if base in _CRYPTO_BASES else None
+        if clean.endswith(quote):
+            base = clean[: -len(quote)]
+            if base in _CRYPTO_BASES:
+                return base
     return None
 
 

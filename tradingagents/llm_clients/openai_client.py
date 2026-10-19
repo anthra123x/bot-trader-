@@ -106,6 +106,12 @@ class NormalizedChatOpenAI(ChatOpenAI):
                     else:
                         raise
                 else:
+                    if ("429" in err_str or "rate_limit" in err_str.lower()) and os.getenv("OPENROUTER_API_KEY") and "groq" in str(getattr(self, "openai_api_base", "")):
+                        logger.warning("[GROQ_FAILOVER] ⚡ Cuota de Groq saturada (429). Derivando petición a OpenRouter...")
+                        from .factory import create_llm_client
+                        fallback_model = os.getenv("OPENROUTER_FALLBACK_MODEL", "nvidia/nemotron-3.5-lightning:free")
+                        fb_client = create_llm_client("openrouter", fallback_model, api_key=os.getenv("OPENROUTER_API_KEY"), timeout=30.0)
+                        return normalize_content(fb_client.get_llm().invoke(input, config=config, **kwargs))
                     raise
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
