@@ -305,7 +305,24 @@ class RiskEngine:
                 )
                 return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
 
-        # 4. Palanca C: Techo Anti-Trampas (BULL_TRAP_OVERBOUGHT: RSI >= 64.0)
+        # 4. Real-Time Market Research & Prudence Gatekeeper
+        market_prudence = signal.metrics.get("market_prudence")
+        prudence_directive = signal.metrics.get("prudence_directive") or "Condiciones adversas detectadas por investigación de mercado"
+        prudence_multiplier = float(signal.metrics.get("prudence_multiplier", 1.0))
+        if signal.action == OrderSide.BUY:
+            if market_prudence == "IMPRUDENT_ADVERSE_VETO":
+                rejection_reasons.append(
+                    f"VETO DE INVESTIGACIÓN DE MERCADO: El subagente de investigación dictamina "
+                    f"entorno IMPRUDENTE ({prudence_directive}). Capital protegido al 100% en liquidez."
+                )
+                return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+            elif market_prudence == "CAUTION_HEADWINDS" or prudence_multiplier < 1.0:
+                warnings.append(
+                    f"ADVERTENCIA DE MERCADO: Subagente de investigación detecta turbulencia/viento en contra "
+                    f"({prudence_directive}). Asignación prudencial ajustada al {prudence_multiplier*100:.0f}%."
+                )
+
+        # 5. Palanca C: Techo Anti-Trampas (BULL_TRAP_OVERBOUGHT: RSI >= 64.0)
         max_rsi_ceiling = getattr(self.config, "max_overbought_rsi_buy", 64.0)
         signal_rsi = float(signal.metrics.get("rsi", 50.0))
         if signal.action == OrderSide.BUY and signal_rsi >= max_rsi_ceiling:
@@ -315,7 +332,7 @@ class RiskEngine:
             )
             return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
 
-        # 5. Palanca B: Filtro Macro Institucional SMA-200 (Paul Tudor Jones Rule)
+        # 6. Palanca B: Filtro Macro Institucional SMA-200 (Paul Tudor Jones Rule)
         sma200 = float(signal.metrics.get("sma200", 0.0))
         div_type = signal.metrics.get("divergence", "NONE")
         if signal.action == OrderSide.BUY and getattr(self.config, "enable_macro_sma200_filter", True) and sma200 > 0:
@@ -326,7 +343,7 @@ class RiskEngine:
                 )
                 return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
 
-        # 6. High-Conviction Institutional Quality Gate
+        # 7. High-Conviction Institutional Quality Gate
         min_required_conf = getattr(self.config, "min_signal_confidence", 0.0)
         if signal.action == OrderSide.BUY and min_required_conf > 0 and signal.confidence < min_required_conf:
             rejection_reasons.append(
@@ -335,7 +352,7 @@ class RiskEngine:
             )
             return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
 
-        # 7. Correlated Crypto Exposure Gatekeeper (Max concurrent crypto positions)
+        # 8. Correlated Crypto Exposure Gatekeeper (Max concurrent crypto positions)
         if signal.action == OrderSide.BUY and signal.asset_class == AssetClass.CRYPTO:
             max_crypto_pos = getattr(self.config, "max_concurrent_crypto_positions", 4)
             crypto_positions_count = sum(1 for p in positions if p.asset_class == AssetClass.CRYPTO and p.quantity > 0)
@@ -347,7 +364,7 @@ class RiskEngine:
                 )
                 return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
 
-        # 8. Pattern Learning & Mistake Veto (ML4T Continuous Feedback)
+        # 9. Pattern Learning & Mistake Veto (ML4T Continuous Feedback)
         pattern_multiplier = 1.0
         if signal.action == OrderSide.BUY and self.pattern_memory:
             # Check for regime drift / loss fatigue
@@ -384,23 +401,6 @@ class RiskEngine:
             elif pattern_check.risk_multiplier < 1.0:
                 pattern_multiplier = pattern_check.risk_multiplier
                 warnings.append(pattern_check.warning_message or f"Asignación reducida al {pattern_multiplier*100:.0f}% por similitud con patrón fallido.")
-
-        # 9. Real-Time Market Research & Prudence Gatekeeper
-        market_prudence = signal.metrics.get("market_prudence")
-        prudence_directive = signal.metrics.get("prudence_directive") or "Condiciones adversas detectadas por investigación de mercado"
-        prudence_multiplier = float(signal.metrics.get("prudence_multiplier", 1.0))
-        if signal.action == OrderSide.BUY:
-            if market_prudence == "IMPRUDENT_ADVERSE_VETO":
-                rejection_reasons.append(
-                    f"VETO DE INVESTIGACIÓN DE MERCADO: El subagente de investigación dictamina "
-                    f"entorno IMPRUDENTE ({prudence_directive}). Capital protegido al 100% en liquidez."
-                )
-                return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
-            elif market_prudence == "CAUTION_HEADWINDS" or prudence_multiplier < 1.0:
-                warnings.append(
-                    f"ADVERTENCIA DE MERCADO: Subagente de investigación detecta turbulencia/viento en contra "
-                    f"({prudence_directive}). Asignación prudencial ajustada al {prudence_multiplier*100:.0f}%."
-                )
 
         # 3. Position check for SELL orders and allocation limits
         existing_position = next((p for p in positions if normalize_symbol(p.symbol) == norm_sym), None)
