@@ -26,6 +26,23 @@ class EvidenceKind(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class PermissionTier(StrEnum):
+    """REA-inspired permission tiers for tool isolation."""
+    OBSERVATIONAL = "OBSERVATIONAL"  # Read-only telemetry (safe, zero mutation)
+    DELIBERATIVE = "DELIBERATIVE"    # Session/Ledger mutation (recorded audit trail)
+    MUTATIVE = "MUTATIVE"            # System mutation (order execution, risk updates)
+
+
+class ToolEffects(BaseModel):
+    """Capabilities and side-effects profile reverse-engineered from REA."""
+    permission_tier: PermissionTier = PermissionTier.OBSERVATIONAL
+    mutates_target: bool = False
+    mutates_session: bool = False
+    writes_filesystem: bool = False
+    may_discard_data: bool = False
+    idempotent: bool = True
+
+
 class CognitivePhase(StrEnum):
     DECOMPILE = "DECOMPILE"      # Phase 1: Read raw account telemetry and market data without hallucination
     UNDERSTAND = "UNDERSTAND"    # Phase 2: Derive math and infer market thesis with invalidation bounds
@@ -189,3 +206,88 @@ class ExecuteOrderResult(BaseModel):
     filled_price: Optional[float] = None
     status: str
     error_message: Optional[str] = None
+
+
+class SimulateOrderArgs(BaseModel):
+    symbol: str
+    action: str = "BUY"
+    nominal_price: float
+    stop_loss: float
+    take_profit: float
+    quantity: float
+    historical_win_rate: float = 0.55
+
+
+class SimulateOrderResult(BaseModel):
+    simulated_fill_price: float
+    effective_stop_loss: float
+    effective_take_profit: float
+    estimated_slippage_dollars: float
+    estimated_commission_dollars: float
+    net_reward_dollars: float
+    net_risk_dollars: float
+    net_risk_reward_ratio: float
+    statistical_expectancy: float
+    is_positive_expectancy: bool
+    is_convex_asymmetric: bool
+    rejection_reason: Optional[str] = None
+
+
+class AdmissionTicket(BaseModel):
+    """REA-inspired admission certificate required to execute state mutations."""
+    ticket_id: str = Field(default_factory=lambda: f"adm_{uuid.uuid4().hex[:10]}")
+    ledger_id: str
+    tool_name: str
+    is_admitted: bool
+    rejection_reason: Optional[str] = None
+    fingerprint: str
+    issued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# Explicit capability audit for MCP tools reverse-engineered from REA
+TOOL_EFFECTS_REGISTRY: dict[str, ToolEffects] = {
+    "inspect_portfolio": ToolEffects(
+        permission_tier=PermissionTier.OBSERVATIONAL,
+        mutates_target=False,
+        mutates_session=False,
+        idempotent=True,
+    ),
+    "inspect_market": ToolEffects(
+        permission_tier=PermissionTier.OBSERVATIONAL,
+        mutates_target=False,
+        mutates_session=False,
+        idempotent=True,
+    ),
+    "simulate_order_execution": ToolEffects(
+        permission_tier=PermissionTier.OBSERVATIONAL,
+        mutates_target=False,
+        mutates_session=False,
+        idempotent=True,
+    ),
+    "query_evidence_ledger": ToolEffects(
+        permission_tier=PermissionTier.OBSERVATIONAL,
+        mutates_target=False,
+        mutates_session=False,
+        idempotent=True,
+    ),
+    "deliberate_evidence_ledger": ToolEffects(
+        permission_tier=PermissionTier.DELIBERATIVE,
+        mutates_target=False,
+        mutates_session=True,  # Mutates session ledger
+        idempotent=False,
+    ),
+    "validate_risk": ToolEffects(
+        permission_tier=PermissionTier.MUTATIVE,
+        mutates_target=False,
+        mutates_session=True,
+        idempotent=True,
+    ),
+    "execute_order": ToolEffects(
+        permission_tier=PermissionTier.MUTATIVE,
+        mutates_target=True,  # Mutates account positions/equity on broker
+        mutates_session=True,
+        may_discard_data=False,
+        idempotent=False,
+    ),
+}
+

@@ -348,6 +348,12 @@ class BotRunner:
         except Exception as pe:
             logger.debug("Could not construct EnhancedPortfolioContext for graph: %s", pe)
 
+        # Phase 1: Decompile live unadulterated state into immutable Evidence Ledger
+        ledger = self.brain.decompile_state(symbol, date)
+
+        # Optional qualitative LLM multi-agent committee debate
+        final_state = {}
+        rating = screen_res.bias if screen_res else "HOLD"
         try:
             active_graph = self.crypto_graph if is_crypto else self.equity_graph
             final_state, rating = active_graph.propagate(symbol, date, asset_type=asset_type, portfolio=portfolio_ctx)
@@ -367,18 +373,16 @@ class BotRunner:
                 "trader_investment_plan": f"Ejecución algorítmica con R:R {screen_res.risk_reward_ratio:.2f}:1 para maximizar margen de ganancia."
             }
 
-        # Record multi-agent consensus, perspective notes, and signals in Neon PostgreSQL
+        # Phase 2: Deliberate via REA Cognitive Loop (Claude/Aider scratchpad + Backtrader simulation + Hummingbot guards)
+        deliberated_ledger = self.brain.deliberate_with_cognitive_loop(
+            symbol=symbol,
+            trade_date=date,
+            screen_res=screen_res,
+            ledger=ledger,
+        )
+
+        # Record consensus, perspective notes, and Evidence Ledger in Neon PostgreSQL
         try:
-            # Build and deliberate REA Evidence Ledger
-            ledger = self.brain.decompile_state(symbol, date)
-            deliberated_ledger = self.brain.deliberate_and_synthesize(
-                ledger=ledger,
-                candidate_rating=rating,
-                confidence=round(screen_res.score / 100.0, 2) if screen_res else 0.75,
-                target_price=screen_res.suggested_take_profit if screen_res else None,
-                stop_loss=screen_res.suggested_stop_loss if screen_res else None,
-                rationale=str(final_state.get("final_trade_decision") or ""),
-            )
             analyst_signals = {
                 "evidence_ledger_id": deliberated_ledger.ledger_id,
                 "fingerprint": deliberated_ledger.compute_fingerprint(),
@@ -390,12 +394,12 @@ class BotRunner:
                 "trader_plan": str(final_state.get("trader_investment_plan") or "")[:500],
                 "evidence_ledger": deliberated_ledger.model_dump(mode="json"),
             }
-            reasoning = str(final_state.get("final_trade_decision") or "")
+            reasoning = deliberated_ledger.decision.rationale if deliberated_ledger.decision else str(final_state.get("final_trade_decision") or "")
             self.db.save_debate(
                 symbol=symbol,
                 trade_date=date,
-                rating=rating,
-                action=self._map_rating_to_side(rating).value,
+                rating=deliberated_ledger.decision.rating if deliberated_ledger.decision else rating,
+                action=deliberated_ledger.decision.action if deliberated_ledger.decision else "HOLD",
                 current_price=current_price,
                 analyst_signals=analyst_signals,
                 reasoning=reasoning,
@@ -403,7 +407,13 @@ class BotRunner:
         except Exception as e:
             logger.warning("[NEON] No se pudo registrar debate con Evidence Ledger en Neon: %s", e)
 
-        return self.process_signal_and_execute(symbol, rating, final_state, current_price, date, quant_result=screen_res)
+        # Phase 3: Controlled Execution via AgentBrain (Recreate & Execute fail-closed)
+        executed_order, _ = self.brain.recreate_and_execute(deliberated_ledger)
+        if executed_order:
+            self.notifier.notify_order_execution(executed_order)
+            return executed_order
+
+        return None
 
     def manage_open_positions(self) -> list[Order]:
         """QuantConnect LEAN Trailing Stop & Position Manager.
@@ -727,6 +737,8 @@ class BotRunner:
                         logger.debug("Failed to record trade outcome in pattern memory: %s", pe)
 
                 self.risk_engine.register_trade_exit(p.symbol, is_loss=is_loss)
+                if hasattr(self.brain, "institutional_guard"):
+                    self.brain.institutional_guard.register_trade_outcome(p.symbol, is_loss=is_loss)
 
                 self.notifier.notify_order_execution(executed)
                 try:

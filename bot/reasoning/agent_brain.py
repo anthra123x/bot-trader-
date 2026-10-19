@@ -37,6 +37,8 @@ from bot.reasoning.contracts import (
     TradingDecision,
     TradingInference,
 )
+from bot.risk.institutional_guard import InstitutionalExecutionGuard, OrderState
+from bot.risk.order_simulator import ExecutionSimulator
 from bot.risk.quant_screener import QuantScreener, QuantScreenResult
 from bot.risk.regime_specialist import REGIME_SPECIALIST, MarketPrudence
 from bot.risk.risk_engine import RiskEngine
@@ -54,6 +56,8 @@ class AgentBrain:
         risk_engine: RiskEngine | None = None,
         db: NeonRepository | None = None,
         quant_screener: QuantScreener | None = None,
+        institutional_guard: InstitutionalExecutionGuard | None = None,
+        execution_simulator: ExecutionSimulator | None = None,
     ):
         self.config = config or BOT_CONFIG
         from bot.brokers import get_broker
@@ -61,6 +65,12 @@ class AgentBrain:
         self.risk_engine = risk_engine or RiskEngine(self.config.risk)
         self.db = db or get_neon_repo()
         self.quant_screener = quant_screener or QuantScreener()
+        self.institutional_guard = institutional_guard or InstitutionalExecutionGuard(
+            cooldown_seconds=self.config.risk.cooldown_period_seconds,
+        )
+        self.execution_simulator = execution_simulator or ExecutionSimulator(
+            min_risk_reward_ratio=2.0,
+        )
 
     def identify_asset_class(self, symbol: str) -> AssetClass:
         """Categorize instrument into Equity or Crypto."""
@@ -347,12 +357,143 @@ class AgentBrain:
         ledger.provenance["fingerprint"] = ledger.compute_fingerprint()
         return ledger
 
+    def deliberate_with_cognitive_loop(
+        self,
+        symbol: str,
+        trade_date: str | None = None,
+        screen_res: QuantScreenResult | None = None,
+        ledger: EvidenceLedger | None = None,
+    ) -> EvidenceLedger:
+        """Execute the cognitive deliberation loop reverse-engineered from Claude Code & Aider.
+        
+        Orchestrates the 5 cognitive scratchpad phases:
+        1. Telemetry Verification: Read unadulterated facts from EvidenceLedger.
+        2. Invalidation Boundary: Formulate the mathematical failure level.
+        3. Expectancy Simulation: Backtrader slippage and VectorBT mathematical edge.
+        4. Institutional Pre-Flight: Hummingbot drift/spread and Freqtrade cooldown.
+        5. Synthesis: Authoritative TradingDecision with cryptographic ledger signature.
+        """
+        if ledger is None:
+            ledger = self.decompile_state(symbol, trade_date)
+
+        curr_price = 0.0
+        for obs in ledger.observations:
+            if obs.facet == "quant_metrics" and "current_price" in obs.data:
+                curr_price = float(obs.data["current_price"])
+
+        if curr_price <= 0 and screen_res and screen_res.current_price > 0:
+            curr_price = screen_res.current_price
+
+        # Check for Critical Vetoes in decompiled limitations
+        has_critical_veto = any(lim.severity == "CRITICAL_VETO" for lim in ledger.limitations)
+        if has_critical_veto:
+            logger.info("[COGNITIVE_LOOP] 🛡️ Critical veto active in decompiled state for %s; enforcing HOLD.", symbol)
+            return self.deliberate_and_synthesize(
+                ledger=ledger,
+                candidate_rating="Hold",
+                confidence=0.0,
+                rationale="Institutional research or prudence veto active; 100% capital preservation enforced.",
+            )
+
+        # Baseline Candidate Proposal from Quantitative Screener
+        if screen_res and screen_res.is_actionable and screen_res.bias in ("BUY", "Buy"):
+            candidate_rating = "Buy"
+            confidence = round(screen_res.score / 100.0, 2)
+            sl = screen_res.suggested_stop_loss
+            tp = screen_res.suggested_take_profit
+            base_rationale = (
+                f"Quantitative setup '{screen_res.setup_name}' confirmed with Score {screen_res.score:.0f}. "
+                f"R:R: {screen_res.risk_reward_ratio:.2f}:1. {screen_res.rationale}"
+            )
+        else:
+            candidate_rating = "Hold"
+            confidence = 0.50
+            sl = curr_price * 0.96 if curr_price > 0 else None
+            tp = curr_price * 1.08 if curr_price > 0 else None
+            base_rationale = "No actionable quantitative setup identified; maintaining neutral stance."
+
+        # Step 3: Run Execution Simulator (Backtrader & VectorBT Expectancy)
+        if candidate_rating == "Buy" and sl and tp and curr_price > 0:
+            sim = self.execution_simulator.simulate_trade_execution(
+                nominal_price=curr_price,
+                suggested_stop_loss=sl,
+                suggested_take_profit=tp,
+                quantity=1.0,
+                side=OrderSide.BUY,
+                asset_class=self.identify_asset_class(symbol),
+                historical_win_rate=max(0.50, confidence),
+            )
+            ledger.derivations.append(
+                MathematicalDerivation(
+                    metric_name="statistical_expectancy",
+                    formula="(WinRate * NetReward) - ((1 - WinRate) * NetRisk)",
+                    inputs={"win_rate": max(0.50, confidence), "net_rr": sim.net_risk_reward_ratio},
+                    value=sim.statistical_expectancy,
+                    unit="USD/unit",
+                )
+            )
+            ledger.derivations.append(
+                MathematicalDerivation(
+                    metric_name="net_risk_reward_ratio",
+                    formula="NetRewardAfterFriction / NetRiskAfterFriction",
+                    inputs={"net_rr": sim.net_risk_reward_ratio},
+                    value=sim.net_risk_reward_ratio,
+                    unit="ratio",
+                )
+            )
+
+            if not sim.is_positive_expectancy or not sim.is_convex_asymmetric:
+                logger.info("[COGNITIVE_LOOP] ⚠️ Expectancy simulation rejected %s: %s", symbol, sim.rejection_reason)
+                ledger.limitations.append(
+                    RiskLimitation(
+                        factor="SimulationExpectancyVeto",
+                        severity="HIGH",
+                        mitigation="Downgraded to HOLD due to negative edge after slippage and fees",
+                        source_warning=sim.rejection_reason,
+                    )
+                )
+                candidate_rating = "Hold"
+                confidence = 0.40
+                base_rationale = f"Simulation edge check rejected: {sim.rejection_reason}"
+
+        # Step 4: Run Institutional Preflight Guard (Hummingbot & Freqtrade)
+        if candidate_rating == "Buy":
+            preflight = self.institutional_guard.evaluate_preflight(
+                symbol=symbol,
+                side=OrderSide.BUY,
+                current_price=curr_price,
+                screen_price=screen_res.current_price if screen_res else curr_price,
+            )
+            if not preflight.is_approved:
+                err_msg = "; ".join(preflight.veto_reasons)
+                logger.info("[COGNITIVE_LOOP] 🛑 Institutional Guard rejected %s: %s", symbol, err_msg)
+                ledger.limitations.append(
+                    RiskLimitation(
+                        factor="InstitutionalGuardVeto",
+                        severity="CRITICAL_VETO",
+                        mitigation="Execution vetoed by institutional risk guard",
+                        source_warning=err_msg,
+                    )
+                )
+                candidate_rating = "Hold"
+                confidence = 0.0
+                base_rationale = f"Institutional guard veto: {err_msg}"
+
+        return self.deliberate_and_synthesize(
+            ledger=ledger,
+            candidate_rating=candidate_rating,
+            confidence=confidence,
+            target_price=tp,
+            stop_loss=sl,
+            rationale=base_rationale,
+        )
+
     # --------------------------------------------------------------------------
     # PHASE 3: RECREATE & CONTROLLED EXECUTION
     # --------------------------------------------------------------------------
 
     def recreate_and_execute(self, ledger: EvidenceLedger) -> tuple[Order | None, EvidenceLedger]:
-        """Validate against RiskEngine (fail-closed) and submit order to broker."""
+        """Validate against RiskEngine, Institutional Guards, and Simulator; dispatch order to broker."""
         ledger.phase = CognitivePhase.RECREATE
         symbol = ledger.symbol
         asset_class = self.identify_asset_class(symbol)
@@ -362,8 +503,58 @@ class AgentBrain:
             self._record_audit_in_db(ledger, order=None)
             return None, ledger
 
-        # Build TradeSignal for RiskEngine
+        # 1. Institutional Pre-Flight Guard Check (Hummingbot & Freqtrade)
         action = OrderSide.BUY if ledger.decision.action == "BUY" else OrderSide.SELL
+        entry_price = ledger.decision.entry_price
+        sl_price = ledger.decision.suggested_stop_loss
+        tp_price = ledger.decision.suggested_take_profit
+
+        preflight = self.institutional_guard.evaluate_preflight(
+            symbol=symbol,
+            side=action,
+            current_price=entry_price,
+            screen_price=entry_price,
+        )
+        if not preflight.is_approved:
+            err_msg = "; ".join(preflight.veto_reasons)
+            logger.info("[AGENT_BRAIN] 🛑 Orden vetada por InstitutionalExecutionGuard para %s: %s", symbol, err_msg)
+            ledger.limitations.append(
+                RiskLimitation(
+                    factor="InstitutionalGuardVeto",
+                    severity="CRITICAL_VETO",
+                    mitigation="Order execution blocked by institutional guard",
+                    source_warning=err_msg,
+                )
+            )
+            self._record_audit_in_db(ledger, order=None)
+            return None, ledger
+
+        # 2. Backtrader & VectorBT Expectancy Check
+        if action == OrderSide.BUY and sl_price and tp_price and entry_price > 0:
+            sim = self.execution_simulator.simulate_trade_execution(
+                nominal_price=entry_price,
+                suggested_stop_loss=sl_price,
+                suggested_take_profit=tp_price,
+                quantity=1.0,
+                side=action,
+                asset_class=asset_class,
+                historical_win_rate=ledger.decision.conviction,
+            )
+            if not sim.is_positive_expectancy or not sim.is_convex_asymmetric:
+                rejection = sim.rejection_reason or "Negative mathematical expectancy or non-convex R:R."
+                logger.info("[AGENT_BRAIN] 🛑 Orden vetada por ExecutionSimulator para %s: %s", symbol, rejection)
+                ledger.limitations.append(
+                    RiskLimitation(
+                        factor="SimulationExpectancyVeto",
+                        severity="HIGH",
+                        mitigation="Order execution blocked due to insufficient statistical edge",
+                        source_warning=rejection,
+                    )
+                )
+                self._record_audit_in_db(ledger, order=None)
+                return None, ledger
+
+        # 3. Build TradeSignal for RiskEngine
         signal = TradeSignal(
             symbol=symbol,
             asset_class=asset_class,
@@ -395,7 +586,7 @@ class AgentBrain:
             self._record_audit_in_db(ledger, order=None)
             return None, ledger
 
-        # Construct and Dispatch Order
+        # 4. Construct and Dispatch Order
         order = Order(
             order_id=str(uuid.uuid4())[:8],
             symbol=symbol,
@@ -408,7 +599,10 @@ class AgentBrain:
             status=OrderStatus.PENDING,
         )
 
+        self.institutional_guard.transition_order_state(order.order_id, OrderState.PENDING_CREATE)
         executed_order = self.broker.submit_order(order)
+        self.institutional_guard.transition_order_state(order.order_id, OrderState.SUBMITTED)
+
         if action == OrderSide.BUY:
             if hasattr(self.risk_engine, "register_entry_context"):
                 self.risk_engine.register_entry_context(symbol, {
