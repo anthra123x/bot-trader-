@@ -194,9 +194,37 @@ class BotRunner:
 
         is_crypto = self.identify_asset_class(symbol) == AssetClass.CRYPTO
         asset_type = "crypto" if is_crypto else "stock"
-        graph = self.crypto_graph if is_crypto else self.equity_graph
+        # Build live PortfolioContext so subagents reason with real account positions and cash
+        portfolio_ctx = None
         try:
-            final_state, rating = graph.propagate(symbol, date, asset_type=asset_type)
+            from tradingagents.portfolio import PortfolioContext, Position as PortfolioPosition
+            bal = self.broker.get_account_balance()
+            active_pos = self.broker.get_positions()
+
+            def _norm_ticker(t: str) -> str:
+                s = t.upper().replace("/", "-")
+                if s.endswith("USD") and "-" not in s and len(s) > 3:
+                    return f"{s[:-3]}-USD"
+                return s
+
+            port_positions = [
+                PortfolioPosition(
+                    ticker=_norm_ticker(p.symbol),
+                    quantity=p.quantity,
+                    average_price=p.entry_price,
+                )
+                for p in active_pos
+            ]
+            portfolio_ctx = PortfolioContext(
+                cash=bal.cash,
+                currency=bal.currency or "USD",
+                positions=port_positions,
+            )
+        except Exception as pe:
+            logger.debug("Could not construct PortfolioContext for graph: %s", pe)
+
+        try:
+            final_state, rating = graph.propagate(symbol, date, asset_type=asset_type, portfolio=portfolio_ctx)
         except Exception as err:
             logger.warning(
                 "[QUANT_FAILOVER] ⚡ LLM comité no disponible o cuota agotada (%s). Activando ejecución algorítmica cuantitativa directa (Bias: %s, R:R %.2f)",
