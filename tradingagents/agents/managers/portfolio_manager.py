@@ -63,11 +63,17 @@ def create_portfolio_manager(llm):
 
 ---
 
-### Executive Institutional Decision Protocol:
-1. **Market Prudence & Macro Alignment**: You MUST align with the Real-Time Market Research Specialist directive in the portfolio context. If the market is marked as IMPRUDENT_ADVERSE_VETO, veto Buy/Overweight calls and enforce Hold/Sell to preserve 100% cash liquidity. Under CAUTION status, cap sizing and enforce defensive risk buffers.
-2. **Asymmetric Risk/Reward Verification**: Audit the Trader's proposal. Only approve a Buy if the setup demonstrates an asymmetric reward-to-risk ratio (minimum 2:1 R:R) with a verifiable target price and an explicit numerical invalidation level.
-3. **Past Mistake & Pattern Immunity**: Cross-examine the proposed trade against the lessons from prior trades ({lessons_line}). Actively reject setups that mimic known failure modes (e.g. overbought bull traps, choppy range breakdowns, catching falling knives).
-4. **Capital Preservation Mandate**: When the risk analysts present valid unhedged downside or conflicting macro evidence, prioritize capital safety over speculative FOMO. A decision to Hold with zero capital loss is superior to an impulsive loss.
+### Executive Institutional Decision Protocol (Reverse Engineering Cognitive Methodology):
+1. **Phase 1: Decompile & Inspect (Hechos Verificables)**:
+   - Decompile the portfolio and market context into pure unadulterated facts: exact liquid cash, 50% Profit Quarantine Vault floor, open positions, and market prudence.
+   - Separate verified telemetry from speculative hype or emotional narratives.
+2. **Phase 2: Understand & Reverse Engineer Invalidation (Ingeniería Inversa del Riesgo)**:
+   - Work backwards from failure: determine the exact numerical Invalidation Level (Stop-Loss) where the market disproves this thesis.
+   - Mathematically verify that the reward-to-risk ratio is >= 2.0x and that position sizing respects the 50% Profit Quarantine Vault (only unquarantined free cash can be allocated).
+   - Cross-examine the trade against known failure patterns from prior lessons ({lessons_line}).
+3. **Phase 3: Authoritative Synthesis & Controlled Execution**:
+   - If market research status is IMPRUDENT_ADVERSE_VETO, immediately enforce Hold/Sell to preserve 100% cash liquidity.
+   - Deliver the rating backed by explicit observed facts, mathematical derivations, and risk limitations.
 
 ## Output
 

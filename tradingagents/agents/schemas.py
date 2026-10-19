@@ -181,8 +181,16 @@ class TraderProposal(BaseModel):
         default=None,
         description="Optional sizing guidance, e.g. '5% of portfolio'.",
     )
+    risk_reward_ratio: float | None = Field(
+        default=None,
+        description="Mathematical reward-to-risk ratio ((Target - Entry) / (Entry - StopLoss)). Must be >= 2.0x for Buy.",
+    )
+    invalidation_condition: str | None = Field(
+        default=None,
+        description="Specific structural failure condition or price break that disproves this transaction proposal.",
+    )
 
-    @field_validator("entry_price", "stop_loss", mode="before")
+    @field_validator("entry_price", "stop_loss", "risk_reward_ratio", mode="before")
     @classmethod
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
@@ -206,6 +214,13 @@ def render_trader_proposal(proposal: TraderProposal) -> str:
                          ("Stop Loss", proposal.stop_loss),
                          ("Position Sizing", proposal.position_sizing)):
         parts.extend(["", f"**{label}**: {value if value is not None and value != '' else 'not provided'}"])
+
+    # REA Reverse Engineering Fields (rendered when present)
+    if proposal.risk_reward_ratio is not None:
+        parts.extend(["", f"**Risk/Reward Ratio**: {proposal.risk_reward_ratio:.2f}x"])
+    if proposal.invalidation_condition:
+        parts.extend(["", f"**Invalidation Condition**: {proposal.invalidation_condition}"])
+
     parts.extend([
         "",
         f"FINAL TRANSACTION PROPOSAL: **{proposal.action.value.upper()}**",
@@ -258,8 +273,27 @@ class PortfolioDecision(BaseModel):
         default=None,
         description="Optional recommended holding period, e.g. '3-6 months'.",
     )
+    invalidation_level: float | None = Field(
+        default=None,
+        description=(
+            "Phase 2 (Understand): The exact numerical stop-loss / price level that "
+            "invalidates this thesis. If price crosses this, the thesis is proven false."
+        ),
+    )
+    observed_facts: list[str] = Field(
+        default_factory=list,
+        description="Phase 1 (Decompile): Exact factual telemetry read from balance, positions, regime, and quant metrics.",
+    )
+    mathematical_derivations: list[str] = Field(
+        default_factory=list,
+        description="Phase 2 (Understand): Verifiable calculations (R:R ratio, 50% Profit Quarantine Vault floor, Kelly size).",
+    )
+    risk_limitations: list[str] = Field(
+        default_factory=list,
+        description="Phase 2 (Understand): Known operational risks, macro headwinds, or lessons from prior matching mistake patterns.",
+    )
 
-    @field_validator("price_target", mode="before")
+    @field_validator("price_target", "invalidation_level", mode="before")
     @classmethod
     def _nullish_float_to_none(cls, v):
         return _coerce_optional_float(v)
@@ -285,6 +319,19 @@ def render_pm_decision(decision: PortfolioDecision) -> str:
     target = decision.price_target if decision.price_target is not None else "not provided"
     parts.extend(["", f"**Price Target**: {target}"])
     parts.extend(["", f"**Time Horizon**: {decision.time_horizon or 'not provided'}"])
+
+    if decision.invalidation_level is not None:
+        parts.extend(["", f"**Invalidation Level**: ${decision.invalidation_level:.2f}"])
+    if decision.observed_facts:
+        obs_text = "\n".join(f"- {o}" for o in decision.observed_facts)
+        parts.extend(["", f"**Decompiled Observations**:\n{obs_text}"])
+    if decision.mathematical_derivations:
+        der_text = "\n".join(f"- {d}" for d in decision.mathematical_derivations)
+        parts.extend(["", f"**Mathematical Derivations**:\n{der_text}"])
+    if decision.risk_limitations:
+        lim_text = "\n".join(f"- {l}" for l in decision.risk_limitations)
+        parts.extend(["", f"**Risk Limitations & Unknowns**:\n{lim_text}"])
+
     return "\n".join(parts)
 
 

@@ -34,21 +34,23 @@ def create_trader(llm):
 
         if market_report:
             grounding = (
-                "Ground concrete price levels (entry, stop-loss, position sizing) in the technical "
-                "market report's price structure -- current price, support/resistance, ATR, and "
-                "volatility -- and use the research plan for direction and strategy. "
-                "Enforce mathematical risk/reward convexity: only propose Buy when expected profit target "
-                "offers at least 2.0x the distance to stop-loss ((Target - Entry) / (Entry - StopLoss) >= 2.0). "
-                "Place stop-loss beyond normal market volatility noise using ATR and local swing support. "
+                "Apply Reverse-Engineering Analysis (Decompile -> Understand Invalidation -> Reconstruct Proposal): "
+                "1. Decompile: Ground concrete price levels in the technical market report's real price structure -- "
+                "current price, support/resistance, ATR, and volatility -- rather than ungrounded estimates. "
+                "2. Understand Failure (Invalidation Condition): Explicitly define the invalidation condition (stop-loss) "
+                "where this trade is proven false before calculating any profit target. "
+                "3. Mathematical Asymmetry: Enforce mathematical risk/reward convexity: only propose Buy when expected profit "
+                "target offers at least 2.0x the distance to stop-loss ((Target - Entry) / (Entry - StopLoss) >= 2.0). "
+                "Place stop-loss beyond normal volatility noise using ATR and local swing support. "
                 "If favorable 2:1 asymmetry is absent or risk is unquantifiable, recommend Hold. "
-                "Respect the Real-Time Market Research Specialist directive in portfolio context: under CAUTION "
+                "4. Market Prudence: Respect the Real-Time Market Research Specialist directive in portfolio context: under CAUTION "
                 "status, scale sizing down to 50%; under IMPRUDENT status, recommend Hold. "
             )
             report_section = f"Technical Market Report:\n{market_report}\n\n"
         else:
             grounding = (
-                "Enforce convex risk/reward: only propose Buy when upside potential is at least twice the downside risk. "
-                "Otherwise recommend Hold. "
+                "Apply Reverse-Engineering Analysis: Enforce convex risk/reward: only propose Buy when upside potential "
+                "is at least twice the downside risk and has an explicit invalidation condition. Otherwise recommend Hold. "
             )
             report_section = ""
 
