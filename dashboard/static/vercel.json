@@ -33,5 +33,11 @@
       "source": "/health",
       "destination": "https://bot-trader-dear.onrender.com/health"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/keepalive",
+      "schedule": "*/10 * * * *"
+    }
   ]
 }
