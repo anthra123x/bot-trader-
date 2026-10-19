@@ -28,6 +28,11 @@ dependencies = [
     "stockstats>=0.6.5",
     "typing-extensions>=4.14.0",
     "yfinance>=1.7.0",
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "psycopg2-binary>=2.9.9",
+    "pydantic>=2.0.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -49,11 +54,12 @@ tradingagents = "cli.main:app"
 version = {attr = "tradingagents.__version__"}
 
 [tool.setuptools.packages.find]
-include = ["tradingagents*", "cli*"]
+include = ["tradingagents*", "cli*", "bot*", "dashboard*"]
 
 [tool.setuptools.package-data]
 cli = ["static/*"]
 tradingagents = ["assets/*.svg"]
+dashboard = ["static/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

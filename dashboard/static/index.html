@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TradingAgents OS | Monitor Autónomo de Trading Cuantitativo</title>
+  <meta name="description" content="Terminal ejecutiva y monitor autónomo en tiempo real para TradingAgents con Alpaca, QuantConnect LEAN y Freqtrade.">
+  <link rel="stylesheet" href="/static/css/style.css?v=7.0">
+  <!-- Chart.js CDN for live equity curve -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Executive Header -->
+    <header class="app-header">
+      <div class="brand-section">
+        <div class="logo-badge" id="app-logo-badge">⚡</div>
+        <div class="brand-titles">
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <h1>TradingAgents OS</h1>
+            <span class="badge-version">v2.0 AUTÓNOMO</span>
+          </div>
+          <span>Autonomous Quantitative Engine</span>
+        </div>
+      </div>
+
+      <!-- Ticker horizontal con desplazamiento táctil suave para móvil -->
+      <div class="header-status-ticker">
+        <div class="header-status-group">
+          <div class="status-pill" id="bot-status-pill">
+            <span class="status-dot online" id="bot-status-dot"></span>
+            <span id="bot-status-text">Operando 24/7 autónomo</span>
+          </div>
+          <div class="status-pill">
+            <span id="active-broker-badge">Alpaca Paper</span>
+          </div>
+          <div class="status-pill" id="db-status-pill">
+            <span class="status-dot online" id="db-status-dot"></span>
+            <span id="active-db-badge" style="color: var(--accent-success);">Neon PostgreSQL</span>
+          </div>
+          <div class="status-pill" id="regime-status-pill" title="Especialista de Régimen y Volatilidad Dinámica">
+            <span class="status-dot online" id="regime-status-dot"></span>
+            <span id="active-regime-badge" style="color: #38bdf8;">Régimen: Evaluando...</span>
+          </div>
+          <div class="status-pill" id="sentiment-status-pill" title="Subagente Investigador de Sentimiento Web 24/7">
+            <span class="status-dot online" id="sentiment-status-dot"></span>
+            <span id="active-sentiment-badge" style="color: #c084fc;">🌐 Web: FGI 59</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <!-- Botón de Centro de Notificaciones -->
+        <button class="btn-icon-badge" id="btn-notifications-toggle" onclick="toggleNotificationsModal()" title="Centro de Notificaciones en Vivo">
+          <span class="bell-icon">🔔</span>
+          <span class="badge-count" id="notif-badge-count">0</span>
+        </button>
+        <button class="btn btn-secondary header-btn-scan" onclick="triggerFullScan()" title="Ejecuta un barrido inmediato de análisis en la cartera">
+          ⚡ Escanear
+        </button>
+        <button class="btn btn-danger header-btn-kill" id="btn-kill-switch" onclick="triggerKillSwitch()" title="Detención inmediata de todas las operaciones">
+          🚨 Parar
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Dashboard Grid -->
+    <main class="dashboard-main">
+      <!-- KPI Top Summary Grid -->
+      <section class="kpi-grid">
+        <div class="kpi-card" id="card-equity">
+          <div class="kpi-header">
+            <span class="kpi-title">Cartera Total (Equity)</span>
+            <span class="kpi-icon">💰</span>
+          </div>
+          <div class="kpi-value" id="kpi-equity">$100,000.00</div>
+          <div class="kpi-subtext" id="kpi-cash-sub">
+            Cash: $100,000.00 USD
+          </div>
+        </div>
+
+        <div class="kpi-card" id="card-pnl">
+          <div class="kpi-header">
+            <span class="kpi-title">P&L de la Sesión</span>
+            <span class="kpi-icon">📈</span>
+          </div>
+          <div class="kpi-value" id="kpi-pnl">$0.00</div>
+          <div class="kpi-subtext" id="kpi-pnl-realized">
+            Conectado a Alpaca Matching Engine
+          </div>
+        </div>
+
+        <div class="kpi-card" id="card-buying-power">
+          <div class="kpi-header">
+            <span class="kpi-title">Poder de Compra (Liquidez)</span>
+            <span class="kpi-icon">⚡</span>
+          </div>
+          <div class="kpi-value" id="kpi-buying-power">$400,000.00</div>
+          <div class="kpi-subtext" id="kpi-equity-sub">
+            Margen 4x Alpaca Paper
+          </div>
+        </div>
+
+        <div class="kpi-card" id="card-drawdown">
+          <div class="kpi-header">
+            <span class="kpi-title">Control de Riesgo & Drawdown</span>
+            <span class="kpi-icon">🛡️</span>
+          </div>
+          <div class="kpi-value" id="kpi-drawdown">0.00%</div>
+          <div class="kpi-subtext" id="kpi-winrate-sub">
+            Win Rate: 0.0% • Freqtrade Guard Activo
+          </div>
+        </div>
+      </section>
+
+      <!-- Workspace 2 Columns -->
+      <div class="workspace-grid">
+        <!-- Left Main Column (Performance & Operations) -->
+        <div class="workspace-main">
+          <!-- Portfolio View (Equity Trajectory + Positions) -->
+          <div class="mobile-view-pane active" id="view-portfolio">
+            <!-- Live Equity Trajectory -->
+            <div class="card-panel">
+              <div class="card-header">
+                <div class="card-title-group">
+                  <span class="card-title">Trayectoria de Equity en Tiempo Real</span>
+                  <span class="badge badge-success">Live Feed</span>
+                </div>
+                <button class="btn btn-secondary" style="padding: 4px 10px; font-size: 12px;" onclick="fetchTelemetryData()">🔄 Actualizar</button>
+              </div>
+              <div class="chart-wrapper">
+                <canvas id="equityChart"></canvas>
+              </div>
+            </div>
+
+            <!-- Open Positions & Trailing Stops (LEAN Model) -->
+            <div class="card-panel">
+              <div class="card-header">
+                <div class="card-title-group">
+                  <span class="card-title">Posiciones Activas & Trailing Stops</span>
+                  <span class="badge badge-info" id="positions-count-badge">0 Activas</span>
+                </div>
+                <span class="header-hint">Protección LEAN (+1.5% Offset)</span>
+              </div>
+              <div class="table-responsive">
+                <table class="data-table" id="positions-table">
+                  <thead>
+                    <tr>
+                      <th>Activo</th>
+                      <th>Tipo</th>
+                      <th>Cantidad</th>
+                      <th>Entrada</th>
+                      <th>Precio Actual</th>
+                      <th>P&L Flotante</th>
+                    </tr>
+                  </thead>
+                  <tbody id="positions-table-body">
+                    <tr>
+                      <td colspan="6" style="text-align: center; color: var(--text-muted); padding: 32px;">
+                        No hay posiciones abiertas actualmente. El capital está 100% resguardado.
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <!-- Executed Orders History View -->
+          <div class="mobile-view-pane active" id="view-orders">
+            <div class="card-panel">
+              <div class="card-header">
+                <div class="card-title-group">
+                  <span class="card-title">Registro de Órdenes y Auditoría en Alpaca</span>
+                </div>
+                <span class="header-hint" id="orders-refresh-hint">Sincronizado con Matching Engine</span>
+              </div>
+              <div class="table-responsive">
+                <table class="data-table" id="orders-table">
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>Símbolo</th>
+                      <th>Operación</th>
+                      <th>Cantidad</th>
+                      <th>Precio</th>
+                      <th>Estado</th>
+                      <th>Hora</th>
+                    </tr>
+                  </thead>
+                  <tbody id="orders-table-body">
+                    <tr>
+                      <td colspan="7" style="text-align: center; color: var(--text-muted); padding: 32px;">
+                        No hay órdenes ejecutadas en esta sesión.
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Side Column (Autonomous Intelligence & Activity Feed) -->
+        <div class="workspace-sidebar mobile-view-pane active" id="view-agents">
+          <!-- Monitored Universe Micro-Card -->
+          <div class="card-panel">
+            <div class="card-header">
+              <span class="card-title">Cartera en Monitoreo Continuo</span>
+              <span class="badge badge-success">8 Activos</span>
+            </div>
+            <div style="padding: 16px;">
+              <div class="watchlist-tags" id="watchlist-container">
+                <span class="tag-item">NVDA</span>
+                <span class="tag-item">AAPL</span>
+                <span class="tag-item">MSFT</span>
+                <span class="tag-item">SPY</span>
+                <span class="tag-item">TSLA</span>
+                <span class="tag-item">BTC-USD</span>
+                <span class="tag-item">ETH-USD</span>
+                <span class="tag-item">SOL-USD</span>
+              </div>
+              <div class="safeguards-summary">
+                <div class="safeguard-item">
+                  <span class="safeguard-dot"></span>
+                  <span><strong>Trailing Stop:</strong> Bloqueo dinámico adaptado por volatilidad</span>
+                </div>
+                <div class="safeguard-item">
+                  <span class="safeguard-dot"></span>
+                  <span><strong>Scale-Out:</strong> Toma del 40% de ganancias a +1.0% de beneficio</span>
+                </div>
+                <div class="safeguard-item">
+                  <span class="safeguard-dot"></span>
+                  <span><strong>Rebalanceo:</strong> Recorte automático al superar 35% de concentración</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Live Autonomous Stream (Terminal) -->
+          <div class="agent-terminal" style="flex: 1; display: flex; flex-direction: column;">
+            <div class="terminal-header">
+              <div class="terminal-dots">
+                <span class="t-dot red"></span>
+                <span class="t-dot yellow"></span>
+                <span class="t-dot green"></span>
+                <span style="font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); margin-left: 6px;">autonomous_stream.log</span>
+              </div>
+              <div class="terminal-tabs">
+                <button class="terminal-tab active" onclick="switchTerminalTab('all')">Feed de Agentes</button>
+                <button class="terminal-tab" onclick="switchTerminalTab('agents')">Solo Consenso</button>
+                <button class="terminal-tab" onclick="clearTerminal()">Limpiar</button>
+              </div>
+            </div>
+            <div class="terminal-content" id="terminal-logs">
+              <div class="log-entry"><span class="log-time">[00:00:00]</span><span class="log-info">TradingAgents OS operando en modo 100% autónomo.</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Contenedor Flotante de Toasts y Notificaciones en Pantalla -->
+  <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
+  <!-- Modal / Drawer: Centro de Notificaciones y Configuración de Alertas -->
+  <div id="notifications-modal" class="modal-backdrop" style="display: none;">
+    <div class="modal-dialog modal-notifications">
+      <div class="modal-header">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span style="font-size: 22px;">🔔</span>
+          <div>
+            <h3>Centro de Notificaciones & Alertas</h3>
+            <span style="font-size: 11px; color: var(--text-muted);">Monitoreo de movimientos 24/7 en tiempo real</span>
+          </div>
+        </div>
+        <button class="modal-close" onclick="toggleNotificationsModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <!-- Control de Notificaciones del Navegador / Móvil -->
+        <div class="notif-settings-card">
+          <div class="notif-toggle-row">
+            <div>
+              <strong>Notificaciones Nativas en este Dispositivo</strong>
+              <p style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">
+                Recibe avisos push en tu móvil cada vez que el bot ejecute compras, tomas de ganancias o salidas.
+              </p>
+            </div>
+            <button class="btn btn-secondary" id="btn-request-push" onclick="enablePushNotifications()">
+              🔔 Activar en este Móvil
+            </button>
+          </div>
+          <div class="notif-toggle-row" style="margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border-subtle);">
+            <div>
+              <strong>Alertas Sonoras (Chime Melódico)</strong>
+              <p style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">
+                Reproduce un tono suave y agradable ante eventos clave.
+              </p>
+            </div>
+            <label class="switch-toggle">
+              <input type="checkbox" id="chk-audio-alerts" checked onchange="toggleAudioAlerts(this.checked)">
+              <span class="slider-round"></span>
+            </label>
+          </div>
+          <div style="margin-top: 14px;">
+            <button class="btn btn-secondary" style="font-size: 12px; width: 100%;" onclick="triggerTestNotification()">
+              ⚡ Probar Alerta en Vivo (Sonido + Notificación + Toast)
+            </button>
+          </div>
+        </div>
+
+        <!-- Integración Opcional con Telegram / Webhooks -->
+        <div class="notif-settings-card" style="margin-top: 14px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <strong>Canal de Telegram (Alertas 24/7 al Móvil)</strong>
+            <span class="badge badge-info" id="telegram-status-badge">Opcional</span>
+          </div>
+          <p style="font-size: 11px; color: var(--text-muted); margin-bottom: 10px;">
+            Si deseas que las alertas te lleguen directo a tu chat de Telegram aunque no tengas la web abierta:
+          </p>
+          <div class="form-row-2col">
+            <input type="password" id="input-tg-token" class="form-input" placeholder="Telegram Bot Token">
+            <input type="text" id="input-tg-chat" class="form-input" placeholder="Telegram Chat ID">
+          </div>
+          <button class="btn btn-secondary" style="font-size: 12px; margin-top: 10px; width: 100%;" onclick="saveTelegramSettings()">
+            💾 Guardar Credenciales de Telegram
+          </button>
+        </div>
+
+        <!-- Registro de Movimientos Recientes -->
+        <div style="margin-top: 18px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <strong>Historial de Movimientos del Sistema</strong>
+            <button class="btn-link" onclick="fetchNotifications()">🔄 Refrescar</button>
+          </div>
+          <div id="notifications-feed" class="notifications-feed">
+            <div style="text-align: center; color: var(--text-muted); padding: 24px;">Cargando notificaciones...</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Barra de Navegación Móvil Inferior (Estilo App Nativa) -->
+  <nav class="mobile-bottom-nav">
+    <button class="mobile-nav-btn active" id="mob-nav-portfolio" onclick="switchMobileView('portfolio')">
+      <span class="nav-icon">📊</span>
+      <span class="nav-label">Portafolio</span>
+    </button>
+    <button class="mobile-nav-btn" id="mob-nav-orders" onclick="switchMobileView('orders')">
+      <span class="nav-icon">⚡</span>
+      <span class="nav-label">Órdenes</span>
+    </button>
+    <button class="mobile-nav-btn" id="mob-nav-agents" onclick="switchMobileView('agents')">
+      <span class="nav-icon">🤖</span>
+      <span class="nav-label">Agentes</span>
+    </button>
+    <button class="mobile-nav-btn" id="mob-nav-alerts" onclick="toggleNotificationsModal()">
+      <span class="nav-icon">🔔</span>
+      <span class="nav-label">Alertas</span>
+      <span class="nav-badge-pill" id="mobile-badge-count">0</span>
+    </button>
+  </nav>
+  </div>
+
+  <!-- Hidden compatibility elements to prevent null exceptions in existing controller routines -->
+  <div style="display: none;">
+    <button id="btn-toggle-sim" onclick="toggleSimulation()"></button>
+    <button id="btn-reset-sim" onclick="resetSimulation()"></button>
+    <input type="text" id="manual-symbol">
+    <input type="text" id="new-ticker-input">
+    <div id="settings-modal" class="modal-backdrop">
+      <div class="modal-dialog">
+        <input type="password" id="cfg-gemini-key">
+        <input type="password" id="cfg-openrouter-key">
+        <input type="password" id="cfg-groq-key">
+        <input type="password" id="cfg-mistral-key">
+        <select id="cfg-provider-select"><option value="rotator">rotator</option></select>
+        <input type="number" id="cfg-risk-trade" value="1.5">
+        <input type="number" id="cfg-max-drawdown" value="3.0">
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/js/app.js?v=7.0"></script>
+</body>
+</html>

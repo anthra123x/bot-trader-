@@ -87,7 +87,7 @@ def build_verified_market_snapshot(
 
     latest = df.iloc[-1]
     latest_date = _fmt(latest["Date"])
-    window = max(1, min(int(look_back_days), 30))
+    window = max(1, min(int(look_back_days), 10))
     recent = df.tail(window)
 
     lines = [

@@ -37,7 +37,76 @@ class NormalizedChatOpenAI(ChatOpenAI):
     """
 
     def invoke(self, input, config=None, **kwargs):
-        return normalize_content(super().invoke(input, config, **kwargs))
+        retries = 5
+        while retries > 0:
+            try:
+                return normalize_content(super().invoke(input, config, **kwargs))
+            except Exception as e:
+                err_str = str(e)
+                if ("429" in err_str or "rate_limit" in err_str.lower()) and retries > 1:
+                    import re, time
+                    # Check if tokens per day (TPD) or output tokens per minute (OTPM) was hit
+                    if "tokens per day" in err_str or "TPD" in err_str:
+                        alt_model = "qwen/qwen3.8-27b" if self.model_name == "openai/gpt-oss-20b" else "openai/gpt-oss-20b"
+                        if getattr(self, "_tpd_attempted", False):
+                            # Both models exceeded daily quota; raise immediately for instant quant failover
+                            raise
+                        self._tpd_attempted = True
+                        logger.warning(
+                            "[MODEL_FAILOVER] 🔄 Cuota diaria alcanzada para %s. Probando alternativo %s...",
+                            self.model_name, alt_model
+                        )
+                        self.model_name = alt_model
+                        retries -= 1
+                        continue
+
+                    if "output tokens per minute" in err_str or "OTPM" in err_str:
+                        # OTPM is restricted on qwen free tier (1k limit); switch to gpt-oss-20b or reduce max_tokens
+                        alt_model = "openai/gpt-oss-20b"
+                        logger.warning(
+                            "[MODEL_FAILOVER] 🔄 Cuota de salida (OTPM) excedida en %s. Alternando a %s...",
+                            self.model_name, alt_model
+                        )
+                        self.model_name = alt_model
+                        retries -= 1
+                        continue
+
+                    # Parse delay in minutes and seconds (e.g., '3m10.00s' or '15.5s')
+                    m = re.search(r"try again in (?:(\d+)m)?([\d\.]+)s", err_str)
+                    if m:
+                        mins = float(m.group(1)) if m.group(1) else 0.0
+                        secs = float(m.group(2))
+                        delay = (mins * 60.0 + secs) + 1.0
+                    else:
+                        delay = 10.0
+
+                    if delay > 12.0:
+                        alt_model = "qwen/qwen3.8-27b" if "gpt-oss" in self.model_name else "openai/gpt-oss-20b"
+                        logger.warning(
+                            "[MODEL_FAILOVER] ⏳ Espera de %.1fs en %s. Alternando a %s para continuar de inmediato...",
+                            delay, self.model_name, alt_model
+                        )
+                        self.model_name = alt_model
+                        retries -= 1
+                        continue
+
+                    logger.warning("[RATE_LIMIT_PAUSE] ⏳ Límite de tokens alcanzado. Esperando %.1fs para reanudar...", delay)
+                    time.sleep(min(delay, 12.0))
+                    retries -= 1
+                elif ("400" in err_str or "tool_use_failed" in err_str or "Failed to parse tool call" in err_str) and retries > 1:
+                    alt_model = "qwen/qwen3.8-27b"
+                    if self.model_name != alt_model:
+                        logger.warning(
+                            "[MODEL_FAILOVER] 🛠️ Error de sintaxis en llamada a herramienta para %s. Alternando a %s...",
+                            self.model_name, alt_model
+                        )
+                        self.model_name = alt_model
+                        retries -= 1
+                        continue
+                    else:
+                        raise
+                else:
+                    raise
 
     def with_structured_output(self, schema, *, method=None, **kwargs):
         caps = get_capabilities(self.model_name)

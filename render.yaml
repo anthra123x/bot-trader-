@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: tradingagents-engine
+    runtime: python
+    region: oregon
+    plan: free
+    branch: main
+    buildCommand: "pip install --upgrade pip && pip install ."
+    startCommand: "python server.py"
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: HOST
+        value: 0.0.0.0
+      - key: BOT_BROKER_TYPE
+        value: alpaca
+      - key: ALPACA_PAPER
+        value: "true"
+      - key: BOT_SCAN_INTERVAL_SECONDS
+        value: "1800"
+      - key: BOT_POSITION_INTERVAL_SECONDS
+        value: "60"
+      - key: TRADINGAGENTS_OUTPUT_LANGUAGE
+        value: Spanish
+      - key: TRADINGAGENTS_MAX_DEBATE_ROUNDS
+        value: "1"
+      - key: TRADINGAGENTS_MAX_RISK_ROUNDS
+        value: "1"
+      - key: TRADINGAGENTS_MAX_TOOL_ROUNDS
+        value: "20"
+      - key: TRADINGAGENTS_MAX_TOKENS
+        value: "8192"
+      - key: TRADINGAGENTS_LLM_MAX_RETRIES
+        value: "6"
+      - key: ALPACA_API_KEY
+        sync: false
+      - key: ALPACA_SECRET_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false

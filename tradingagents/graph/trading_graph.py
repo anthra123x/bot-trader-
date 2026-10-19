@@ -390,6 +390,10 @@ class TradingAgentsGraph:
                     key = getattr(msg, "id", None) or (type(msg).__name__, getattr(msg, "content", None))
                     if key not in printed:
                         printed.add(key)
+                        agent_name = getattr(msg, "name", None) or type(msg).__name__
+                        content_snip = (getattr(msg, "content", "") or "")[:120].replace("\n", " ").strip()
+                        if content_snip:
+                            logger.info("🤖 [%s]: %s", agent_name, content_snip)
                         msg.pretty_print()
                 if state is not None:
                     final_state.update(state)

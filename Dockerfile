@@ -1,30 +1,29 @@
-FROM python:3.13-slim AS builder
+FROM python:3.12-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
-
-RUN python -m venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
-
-WORKDIR /build
-COPY . .
-RUN pip install --no-cache-dir .
-
-FROM python:3.13-slim
-
-# TRADINGAGENTS_IN_DOCKER lets an update notice name the rebuild command.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    TRADINGAGENTS_IN_DOCKER=1
+    HOST=0.0.0.0 \
+    PORT=8000
 
-COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH"
+WORKDIR /app
 
-RUN useradd --create-home appuser \
- && install -d -m 0755 -o appuser -g appuser /home/appuser/.tradingagents
-USER appuser
-WORKDIR /home/appuser/app
+# Install curl for container healthcheck and basic system utilities
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder --chown=appuser:appuser /build .
+# Copy project files into container
+COPY . .
 
-ENTRYPOINT ["tradingagents"]
+# Install dependencies and the project
+RUN pip install --no-cache-dir .
+
+# Expose default HTTP port (overridden dynamically by cloud platforms via $PORT)
+EXPOSE 8000
+
+# Healthcheck for orchestration platforms
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
+
+# Run the 24/7 autonomous trading server and web dashboard
+CMD ["python", "server.py"]

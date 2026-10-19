@@ -1,0 +1,372 @@
+"""Unit tests for the trading bot engine, risk management, and paper broker."""
+
+import pytest
+from pathlib import Path
+from bot.models import (
+    AccountBalance,
+    AssetClass,
+    Order,
+    OrderSide,
+    OrderStatus,
+    Position,
+    TradeSignal,
+)
+from bot.risk.risk_engine import RiskEngine
+from bot.config import BotRiskConfig
+from bot.brokers.paper import PaperBroker
+
+
+class TestRiskEngine:
+    def setup_method(self):
+        self.config = BotRiskConfig(
+            max_risk_per_trade_pct=1.5,
+            max_position_size_pct=10.0,
+            max_daily_drawdown_pct=3.0,
+            default_stop_loss_pct=4.0,
+            max_stop_loss_pct=7.0,
+        )
+        self.engine = RiskEngine(self.config)
+
+    def test_buy_approval_and_position_sizing(self):
+        balance = AccountBalance(
+            cash=100_000.0,
+            equity=100_000.0,
+            buying_power=100_000.0,
+            initial_day_equity=100_000.0,
+        )
+        signal = TradeSignal(
+            symbol="AAPL",
+            asset_class=AssetClass.EQUITY,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=1.0,  # Max conviction (100% Kelly allocation = 50 shares)
+            current_price=200.0,
+            stop_loss=192.0,  # 4% risk ($8/share)
+            target_price=220.0,
+        )
+        res = self.engine.evaluate(signal, balance, positions=[])
+        assert res.is_approved is True
+        # Max risk = 1.5% of $100k = $1500. $1500 / $8 = 187.5 -> 187 shares
+        # Max alloc = 10% of $100k = $10,000. $10,000 / $200 = 50 shares
+        # Min(187, 50) = 50 shares
+        assert res.adjusted_quantity == 50
+        assert res.allocated_capital == 10_000.0
+        assert res.stop_loss_price == 192.0
+
+    def test_kill_switch_triggers_on_drawdown(self):
+        balance = AccountBalance(
+            cash=96_000.0,
+            equity=96_000.0,
+            buying_power=96_000.0,
+            initial_day_equity=100_000.0,  # 4.0% loss today > 3.0% limit
+        )
+        signal = TradeSignal(
+            symbol="NVDA",
+            asset_class=AssetClass.EQUITY,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            current_price=100.0,
+            stop_loss=96.0,
+        )
+        res = self.engine.evaluate(signal, balance, positions=[])
+        assert res.is_approved is False
+        assert any("Kill-switch active" in r for r in res.rejection_reasons)
+
+    def test_stop_loss_clamped_when_too_wide(self):
+        balance = AccountBalance(
+            cash=50_000.0,
+            equity=50_000.0,
+            buying_power=50_000.0,
+            initial_day_equity=50_000.0,
+        )
+        signal = TradeSignal(
+            symbol="BTC-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            current_price=60_000.0,
+            stop_loss=50_000.0,  # 16.6% risk > max 7%
+        )
+        res = self.engine.evaluate(signal, balance, positions=[])
+        assert res.is_approved is True
+        # Max 7% stop = 60,000 * 0.93 = 55,800
+        assert res.stop_loss_price == 55800.0
+        assert any("Clamped to max allowable" in w for w in res.risk_warnings)
+
+    def test_sell_rejected_without_open_position(self):
+        balance = AccountBalance(
+            cash=100_000.0,
+            equity=100_000.0,
+            buying_power=100_000.0,
+            initial_day_equity=100_000.0,
+        )
+        signal = TradeSignal(
+            symbol="TSLA",
+            asset_class=AssetClass.EQUITY,
+            trade_date="2026-10-18",
+            rating="Sell",
+            action=OrderSide.SELL,
+            current_price=250.0,
+        )
+        res = self.engine.evaluate(signal, balance, positions=[])
+        assert res.is_approved is False
+        assert any("no open position held" in r for r in res.rejection_reasons)
+
+
+class TestPaperBroker:
+    def test_paper_broker_ledger_flow(self, tmp_path: Path, monkeypatch):
+        db_file = tmp_path / "test_paper.db"
+        broker = PaperBroker(db_path=db_file, initial_cash=10_000.0)
+
+        # Mock current price to avoid external network call
+        monkeypatch.setattr(broker, "get_current_price", lambda sym: 100.0)
+
+        init_bal = broker.get_account_balance()
+        assert init_bal.cash == 10_000.0
+        assert init_bal.equity == 10_000.0
+
+        # Execute Buy
+        order_buy = Order(
+            order_id="ord-1",
+            symbol="MSFT",
+            asset_class=AssetClass.EQUITY,
+            side=OrderSide.BUY,
+            quantity=20.0,
+            limit_price=100.0,
+        )
+        res_buy = broker.submit_order(order_buy)
+        assert res_buy.status == OrderStatus.FILLED
+        assert res_buy.filled_price == 100.0
+
+        bal_after_buy = broker.get_account_balance()
+        assert bal_after_buy.cash == 8_000.0
+        assert bal_after_buy.equity == 10_000.0
+
+        positions = broker.get_positions()
+        assert len(positions) == 1
+        assert positions[0].symbol == "MSFT"
+        assert positions[0].quantity == 20.0
+        assert positions[0].market_value == 2000.0
+
+        # Execute Sell
+        order_sell = Order(
+            order_id="ord-2",
+            symbol="MSFT",
+            asset_class=AssetClass.EQUITY,
+            side=OrderSide.SELL,
+            quantity=20.0,
+            limit_price=110.0,  # Sell at profit
+        )
+        res_sell = broker.submit_order(order_sell)
+        assert res_sell.status == OrderStatus.FILLED
+
+        bal_after_sell = broker.get_account_balance()
+        # Initial 10k - 2k + (20 * 110 = 2200) = 10,200
+        assert bal_after_sell.cash == 10_200.0
+        assert len(broker.get_positions()) == 0
+
+
+class TestAlpacaBroker:
+    def test_alpaca_broker_cli_fallback(self, monkeypatch):
+        from bot.brokers.alpaca import AlpacaBroker
+
+        monkeypatch.setenv("ALPACA_API_KEY", "")
+        monkeypatch.setenv("ALPACA_SECRET_KEY", "")
+        monkeypatch.setenv("ALPACA_ACCESS_TOKEN", "")
+        monkeypatch.setattr("pathlib.Path.exists", lambda self: False)
+
+        broker = AlpacaBroker(api_key="", secret_key="")
+        assert broker._has_direct_keys() is False
+
+        # Mock _run_cli
+        def mock_run_cli(args):
+            if args == ["account", "get"]:
+                return {"cash": "25000.0", "equity": "30000.0", "buying_power": "50000.0", "last_equity": "29000.0"}
+            if args == ["position", "list"]:
+                return [{"symbol": "NVDA", "qty": "10", "avg_entry_price": "120.0", "current_price": "130.0"}]
+            if args[:2] == ["order", "submit"]:
+                return {"id": "alpaca-ord-123"}
+            return {}
+
+        monkeypatch.setattr(broker, "_run_cli", mock_run_cli)
+
+        bal = broker.get_account_balance()
+        assert bal.cash == 25000.0
+        assert bal.equity == 30000.0
+
+        positions = broker.get_positions()
+        assert len(positions) == 1
+        assert positions[0].symbol == "NVDA"
+        assert positions[0].quantity == 10.0
+
+        order = Order(
+            order_id="ord-cli-1",
+            symbol="NVDA",
+            asset_class=AssetClass.EQUITY,
+            side=OrderSide.BUY,
+            quantity=5.0,
+        )
+        res_order = broker.submit_order(order)
+        assert res_order.order_id == "alpaca-ord-123"
+        assert res_order.status == OrderStatus.PENDING
+
+
+class TestLeanAndFreqtradeProtections:
+    def test_trailing_stop_positive_offset_and_ratchet(self):
+        config = BotRiskConfig(
+            enable_trailing_stop=True,
+            trailing_stop_activation_pct=1.5,
+            trailing_stop_distance_pct=1.0,
+        )
+        engine = RiskEngine(config)
+
+        # 1. Entry price = 100.0, Initial Stop Loss = 96.0 (-4%)
+        # Price moves to 100.5 (+0.5%, below 0.8% Break-Even and 1.5% activation)
+        sl, updated = engine.calculate_trailing_stop("AAPL", current_price=100.5, entry_price=100.0, current_stop_loss=96.0)
+        assert updated is False
+        assert sl == 96.0
+
+        # Price moves to 101.0 (+1.0%, triggers Stage 1 Dynamic Break-Even at +0.8%)
+        sl, updated = engine.calculate_trailing_stop("AAPL", current_price=101.0, entry_price=100.0, current_stop_loss=96.0)
+        assert updated is True
+        assert sl == 100.15  # 100.0 * 1.0015 (Break-Even locking fees)
+
+        # 2. Price climbs to 103.0 (+3.0%, above 1.5% activation threshold)
+        # Peak = 103.0, Trailing Stop = 103.0 * (1 - 0.01) = 101.97
+        sl, updated = engine.calculate_trailing_stop("AAPL", current_price=103.0, entry_price=100.0, current_stop_loss=96.0)
+        assert updated is True
+        assert sl == 101.97
+
+        # 3. Price climbs further to 105.0 (+5.0%)
+        # Peak = 105.0, Trailing Stop = 105.0 * (1 - 0.01) = 103.95
+        sl, updated = engine.calculate_trailing_stop("AAPL", current_price=105.0, entry_price=100.0, current_stop_loss=101.97)
+        assert updated is True
+        assert sl == 103.95
+
+        # 4. Price pulls back to 104.2 (Stop must NEVER ratchet downward)
+        sl, updated = engine.calculate_trailing_stop("AAPL", current_price=104.2, entry_price=100.0, current_stop_loss=103.95)
+        assert updated is False
+        assert sl == 103.95
+
+    def test_freqtrade_cooldown_period(self):
+        config = BotRiskConfig(cooldown_period_seconds=1800)
+        engine = RiskEngine(config)
+
+        # Simulate stop-loss exit on TSLA
+        engine.register_trade_exit("TSLA", is_loss=True)
+
+        balance = AccountBalance(cash=50_000.0, equity=50_000.0, buying_power=50_000.0, initial_day_equity=50_000.0)
+        signal = TradeSignal(
+            symbol="TSLA",
+            asset_class=AssetClass.EQUITY,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            current_price=350.0,
+            confidence=0.85,
+        )
+
+        res = engine.evaluate(signal, balance, positions=[])
+        assert res.is_approved is False
+        assert any("CooldownPeriod activo" in r for r in res.rejection_reasons)
+
+    def test_freqtrade_stoploss_guard(self):
+        config = BotRiskConfig(max_consecutive_stoplosses=3)
+        engine = RiskEngine(config)
+
+        # 3 consecutive stoploss events
+        for sym in ["NVDA", "AAPL", "MSFT"]:
+            engine.register_trade_exit(sym, is_loss=True)
+
+        balance = AccountBalance(cash=50_000.0, equity=50_000.0, buying_power=50_000.0, initial_day_equity=50_000.0)
+        signal = TradeSignal(
+            symbol="BTC-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            current_price=80000.0,
+            confidence=0.90,
+        )
+
+        res = engine.evaluate(signal, balance, positions=[])
+        assert res.is_approved is False
+        assert any("StoplossGuard activo" in r for r in res.rejection_reasons)
+
+    def test_tiered_partial_take_profit(self):
+        config = BotRiskConfig(
+            enable_partial_take_profit=True,
+            partial_take_profit_threshold_pct=1.0,
+            partial_take_profit_ratio=0.4,
+        )
+        engine = RiskEngine(config)
+
+        # 1. Price at +0.5% (below threshold) -> No partial TP
+        should_tp, qty = engine.evaluate_partial_take_profit("ETH-USD", current_price=100.5, entry_price=100.0, current_qty=10.0)
+        assert should_tp is False
+        assert qty == 0.0
+
+        # 2. Price at +1.2% (above threshold) -> Triggers 40% scale-out (4.0 u)
+        should_tp, qty = engine.evaluate_partial_take_profit("ETH-USD", current_price=101.2, entry_price=100.0, current_qty=10.0)
+        assert should_tp is True
+        assert qty == 4.0
+
+        # 3. Once registered, subsequent ticks should not re-trigger partial TP
+        engine.register_partial_tp("ETH-USD")
+        should_tp, qty = engine.evaluate_partial_take_profit("ETH-USD", current_price=101.5, entry_price=100.0, current_qty=6.0)
+        assert should_tp is False
+        assert qty == 0.0
+
+        # 4. After full trade exit, tracker resets
+        engine.register_trade_exit("ETH-USD", is_loss=False)
+        should_tp, qty = engine.evaluate_partial_take_profit("ETH-USD", current_price=101.2, entry_price=100.0, current_qty=10.0)
+        assert should_tp is True
+        assert qty == 4.0
+
+    def test_portfolio_dynamic_rebalancing(self):
+        config = BotRiskConfig(
+            enable_dynamic_rebalancing=True,
+            max_concentration_threshold_pct=35.0,
+            target_concentration_pct=25.0,
+        )
+        engine = RiskEngine(config)
+
+        # 1. Overweight position in profit (52.5% concentration, +5.0% profit)
+        pos = Position(
+            symbol="ETH-USD",
+            asset_class=AssetClass.CRYPTO,
+            quantity=25.0,
+            entry_price=2000.0,
+            current_price=2100.0,
+        )
+        should_rebal, trim_qty, reason = engine.evaluate_portfolio_rebalancing(pos, current_price=2100.0, total_equity=100_000.0)
+        assert should_rebal is True
+        assert trim_qty > 0
+        assert "Concentración excesiva" in reason
+
+        # 2. Balanced position (< 35% concentration) -> No rebalance
+        pos_balanced = Position(
+            symbol="BTC-USD",
+            asset_class=AssetClass.CRYPTO,
+            quantity=0.2,
+            entry_price=80000.0,
+            current_price=82000.0,
+        )
+        should_rebal, trim_qty, reason = engine.evaluate_portfolio_rebalancing(pos_balanced, current_price=82000.0, total_equity=100_000.0)
+        assert should_rebal is False
+        assert trim_qty == 0.0
+
+        # 3. Overweight position at a LOSS -> Do not rebalance at loss
+        pos_loss = Position(
+            symbol="SOL-USD",
+            asset_class=AssetClass.CRYPTO,
+            quantity=400.0,
+            entry_price=120.0,
+            current_price=100.0,
+        )
+        should_rebal, trim_qty, reason = engine.evaluate_portfolio_rebalancing(pos_loss, current_price=100.0, total_equity=100_000.0)
+        assert should_rebal is False
+        assert trim_qty == 0.0

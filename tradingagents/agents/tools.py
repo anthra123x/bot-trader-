@@ -35,7 +35,12 @@ def get_stock_data(
         start_date, end_date = as_of_window(start_date, end_date, trade_date)
     except ValueError as e:
         return str(e)
-    return route_to_vendor("get_stock_data", symbol, start_date, end_date)
+    df_str = route_to_vendor("get_stock_data", symbol, start_date, end_date)
+    # Compact output to latest 12 rows to optimize LLM token consumption and prevent 413 errors
+    lines = df_str.strip().split("\n")
+    if len(lines) > 15:
+        return "\n".join(lines[:2] + lines[-12:])
+    return df_str
 
 
 @tool
@@ -63,7 +68,17 @@ def get_indicators(
     results = []
     for ind in indicators:
         try:
-            results.append(route_to_vendor("get_indicators", symbol, ind, curr_date, look_back_days))
+            raw = route_to_vendor("get_indicators", symbol, ind, curr_date, look_back_days)
+            # Filter out boilerplate guide paragraphs and keep latest 3 rows for high token efficiency
+            filtered_lines = [
+                l for l in raw.strip().split("\n")
+                if l.strip() and not any(l.startswith(p) for p in ("Usage:", "Tips:", "MACD", "RSI", "Bollinger", "ATR", "VWMA"))
+            ]
+            if len(filtered_lines) > 5:
+                raw = "\n".join(filtered_lines[:1] + filtered_lines[-3:])
+            else:
+                raw = "\n".join(filtered_lines)
+            results.append(raw)
         except ValueError as e:
             results.append(str(e))
     return "\n\n".join(results)
@@ -111,6 +126,22 @@ def get_fundamentals(
     return route_to_vendor("get_fundamentals", ticker, as_of(curr_date, trade_date))
 
 
+def _compact_financial_table(raw_csv: str, keep_quarters: int = 3) -> str:
+    """Keep the row title and only the most recent N quarters to respect LLM context limits."""
+    lines = raw_csv.strip().split("\n")
+    compacted = []
+    for line in lines:
+        if not line.strip() or line.startswith("#"):
+            compacted.append(line)
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) > (keep_quarters + 1):
+            compacted.append(",".join([parts[0]] + parts[-keep_quarters:]))
+        else:
+            compacted.append(line)
+    return "\n".join(compacted)
+
+
 @tool
 def get_balance_sheet(
     ticker: Annotated[str, InjectedState("company_of_interest")],
@@ -127,7 +158,8 @@ def get_balance_sheet(
     Returns:
         str: A formatted report containing balance sheet data
     """
-    return route_to_vendor("get_balance_sheet", ticker, freq, as_of(curr_date, trade_date))
+    raw = route_to_vendor("get_balance_sheet", ticker, freq, as_of(curr_date, trade_date))
+    return _compact_financial_table(raw)
 
 
 @tool
@@ -146,7 +178,8 @@ def get_cashflow(
     Returns:
         str: A formatted report containing cash flow statement data
     """
-    return route_to_vendor("get_cashflow", ticker, freq, as_of(curr_date, trade_date))
+    raw = route_to_vendor("get_cashflow", ticker, freq, as_of(curr_date, trade_date))
+    return _compact_financial_table(raw)
 
 
 @tool
@@ -165,7 +198,8 @@ def get_income_statement(
     Returns:
         str: A formatted report containing income statement data
     """
-    return route_to_vendor("get_income_statement", ticker, freq, as_of(curr_date, trade_date))
+    raw = route_to_vendor("get_income_statement", ticker, freq, as_of(curr_date, trade_date))
+    return _compact_financial_table(raw)
 
 
 @tool
@@ -226,7 +260,12 @@ def get_insider_transactions(
     Returns:
         str: A report of insider transaction data
     """
-    return route_to_vendor("get_insider_transactions", ticker, trade_date or None)
+    raw = route_to_vendor("get_insider_transactions", ticker, trade_date or None)
+    # Compact to top 8 transactions to keep payload concise and avoid 413 errors
+    lines = raw.strip().split("\n")
+    if len(lines) > 10:
+        return "\n".join(lines[:10])
+    return raw
 
 
 @tool

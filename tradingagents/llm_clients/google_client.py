@@ -20,15 +20,46 @@ def _accepts_minimal_thinking(model: str) -> bool:
     )
 
 
-class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
-    """ChatGoogleGenerativeAI with normalized content output.
+import os
+import logging
 
-    Gemini 3 models return content as list of typed blocks.
-    This normalizes to string for consistent downstream handling.
-    """
+logger = logging.getLogger(__name__)
+
+
+class NormalizedChatGoogleGenerativeAI(ChatGoogleGenerativeAI):
+    """ChatGoogleGenerativeAI with normalized content output and OpenRouter fallback on 429."""
 
     def invoke(self, input, config=None, **kwargs):
-        return normalize_content(super().invoke(input, config, **kwargs))
+        try:
+            return normalize_content(super().invoke(input, config, **kwargs))
+        except Exception as e:
+            err_str = str(e)
+            if ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str or "quota" in err_str.lower()):
+                clean_kwargs = {k: v for k, v in kwargs.items() if k not in ("response_mime_type", "thinking_level", "response_json_schema")}
+                groq_key = os.getenv("GROQ_API_KEY", "").split(",")[0].strip()
+                if groq_key:
+                    try:
+                        groq_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+                        logger.warning(f"Gemini 429 quota reached. Gracefully delegating to Groq Cloud ({groq_model})...")
+                        from .factory import create_llm_client
+                        fb_client = create_llm_client("groq", groq_model, api_key=groq_key, llm_max_retries=0, timeout=30.0)
+                        return fb_client.get_llm().invoke(input, config=config, **clean_kwargs)
+                    except Exception as ge:
+                        ge_str = str(ge)
+                        if any(k in ge_str for k in ("429", "rate_limit", "RateLimitError", "413", "Payload Too Large")) and os.getenv("OPENROUTER_API_KEY"):
+                            logger.warning("Groq rate limit/payload reached. Failing over to OpenRouter...")
+                            from .factory import create_llm_client
+                            fallback_model = os.getenv("OPENROUTER_FALLBACK_MODEL", "nvidia/nemotron-3.5-lightning:free")
+                            fb_client = create_llm_client("openrouter", fallback_model, api_key=os.getenv("OPENROUTER_API_KEY"), timeout=30.0)
+                            return fb_client.get_llm().invoke(input, config=config, **clean_kwargs)
+                        raise
+                elif os.getenv("OPENROUTER_API_KEY"):
+                    logger.warning("Gemini 429 quota reached. Gracefully delegating to OpenRouter fallback...")
+                    from .factory import create_llm_client
+                    fallback_model = os.getenv("OPENROUTER_FALLBACK_MODEL", "nvidia/nemotron-3.5-lightning:free")
+                    fb_client = create_llm_client("openrouter", fallback_model, api_key=os.getenv("OPENROUTER_API_KEY"), timeout=30.0)
+                    return fb_client.get_llm().invoke(input, config=config, **clean_kwargs)
+            raise
 
 
 # The read timeout the OpenAI and Anthropic SDKs use by default.
@@ -53,9 +84,9 @@ class GoogleClient(BaseLLMClient):
                     "callbacks", "http_client", "http_async_client"):
             if key in self.kwargs:
                 llm_kwargs[key] = self.kwargs[key]
-        # Without a timeout a stalled Gemini call waits forever; the OpenAI and
-        # Anthropic SDKs give up after the same 600 seconds (#1417).
+        # Fast failover on rate limit rather than waiting minutes in exponential backoff
         llm_kwargs.setdefault("timeout", REQUEST_TIMEOUT_SECONDS)
+        llm_kwargs.setdefault("max_retries", 1)
 
         # Unified api_key maps to provider-specific google_api_key
         google_api_key = self.kwargs.get("api_key") or self.kwargs.get("google_api_key")

@@ -1,6 +1,8 @@
 .git
 .venv
 .env
+.env.*
+!.env.example
 .claude
 .idea
 .vscode
@@ -11,5 +13,8 @@ build
 dist
 results
 eval_results
-Dockerfile
-docker-compose.yml
+data/*.db*
+*.db
+*.db-shm
+*.db-wal
+*.sqlite*
