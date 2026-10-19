@@ -1066,6 +1066,47 @@ class TestLeanAndFreqtradeProtections:
         assert res_reject.is_approved is False
         assert any("bóveda de ganancias 50%" in r for r in res_reject.rejection_reasons)
 
+    def test_profit_quarantine_vault_default_40_pct_and_scaling(self):
+        """Ensure default BotRiskConfig applies 40% vault retention (60% active working) and 25% sizing."""
+        config = BotRiskConfig()
+        assert config.profit_quarantine_ratio == 0.40
+        assert config.max_position_size_pct == 25.0
+        assert config.partial_take_profit_threshold_pct == 2.2
+        assert config.stage2_take_profit_threshold_pct == 4.5
+        assert config.stage3_take_profit_threshold_pct == 8.0
+        assert config.runner_tp_multiplier == 1.15
+        assert config.max_concentration_threshold_pct == 32.0
+
+        engine = RiskEngine(config, pattern_memory=PatternMemory(db_path=":memory:"))
+
+        # Equity $110,000, initial $100,000 -> $10,000 profit.
+        # Base reserve = 20% of 110k = $22,000.
+        # Quarantined profit = 40% of 10k = $4,000 (leaving $6,000 working).
+        # Total protected = $26,000.
+        bal = AccountBalance(cash=50_000.0, equity=110_000.0, buying_power=50_000.0, initial_day_equity=100_000.0)
+        total_prot, base_prot, quar = engine.calculate_protected_cash_reserve(bal)
+        assert base_prot == 22_000.0
+        assert quar == 4_000.0
+        assert total_prot == 26_000.0
+
+        # Allocation can scale up to 25% of equity ($27,500), constrained by available unencumbered cash ($24,000).
+        signal = TradeSignal(
+            symbol="BTC-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.90,
+            current_price=60_000.0,
+            stop_loss=58_500.0,
+            metrics={"rsi": 52.0, "ema_ratio": 1.02, "atr": 500.0},
+        )
+        res = engine.evaluate(signal, bal, positions=[])
+        assert res.is_approved is True
+        assert any("40% de ganancia neta" in w for w in res.risk_warnings)
+        assert res.allocated_capital <= 24_000.0
+
+
 
 
 
