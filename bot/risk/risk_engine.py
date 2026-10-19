@@ -218,7 +218,75 @@ class RiskEngine:
                 )
                 return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
 
-        # 0. Pattern Learning & Mistake Veto (ML4T Continuous Feedback)
+        # 1. Action check
+        if signal.action == OrderSide.HOLD:
+            return RiskValidationResult(
+                is_approved=False,
+                rejection_reasons=["Trade signal action is HOLD; no execution required."],
+            )
+
+        # 2. Kill-Switch check (daily drawdown) - Blocks new BUYs, but permits protective SELLs
+        if balance.daily_drawdown_pct >= self.config.max_daily_drawdown_pct and signal.action == OrderSide.BUY:
+            rejection_reasons.append(
+                f"Kill-switch active: daily drawdown ({balance.daily_drawdown_pct:.2f}%) "
+                f"exceeds limit ({self.config.max_daily_drawdown_pct:.2f}%). BUY orders prohibited."
+            )
+            return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons)
+
+        # 3. Palanca A: Defensive Regime Veto (Strictly blocks BUYs during market crashes/defensive regimes)
+        regime_val = signal.metrics.get("regime")
+        alloc_factor = float(signal.metrics.get("allocation_factor", 1.0))
+        if signal.action == OrderSide.BUY and getattr(self.config, "enable_defensive_regime_veto", True):
+            if regime_val == "DEFENSIVE_BEAR_BREAKDOWN" or alloc_factor == 0.0:
+                rejection_reasons.append(
+                    f"Veto por Régimen Defensivo: Mercado en desplome/fase bajista correctiva "
+                    f"(Régimen: {regime_val}, Alloc Factor: {alloc_factor:.1f}). Compras prohibidas para resguardar capital en efectivo."
+                )
+                return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+
+        # 4. Palanca C: Techo Anti-Trampas (BULL_TRAP_OVERBOUGHT: RSI >= 64.0)
+        max_rsi_ceiling = getattr(self.config, "max_overbought_rsi_buy", 64.0)
+        signal_rsi = float(signal.metrics.get("rsi", 50.0))
+        if signal.action == OrderSide.BUY and signal_rsi >= max_rsi_ceiling:
+            rejection_reasons.append(
+                f"Veto Anti-Trampa (BULL_TRAP_OVERBOUGHT): Entrada en sobrecompra extrema (RSI {signal_rsi:.1f} >= {max_rsi_ceiling:.1f}). "
+                f"Agotamiento comprador inminente; capital preservado."
+            )
+            return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+
+        # 5. Palanca B: Filtro Macro Institucional SMA-200 (Paul Tudor Jones Rule)
+        sma200 = float(signal.metrics.get("sma200", 0.0))
+        div_type = signal.metrics.get("divergence", "NONE")
+        if signal.action == OrderSide.BUY and getattr(self.config, "enable_macro_sma200_filter", True) and sma200 > 0:
+            if signal.current_price < sma200 and div_type != "BULLISH":
+                rejection_reasons.append(
+                    f"Filtro Macro SMA-200: Precio (${signal.current_price:.2f}) bajo media móvil de 200 períodos (${sma200:.2f}) "
+                    f"sin divergencia alcista confirmada. Compras contra-tendencia bajista vetadas."
+                )
+                return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+
+        # 6. High-Conviction Institutional Quality Gate
+        min_required_conf = getattr(self.config, "min_signal_confidence", 0.0)
+        if signal.action == OrderSide.BUY and min_required_conf > 0 and signal.confidence < min_required_conf:
+            rejection_reasons.append(
+                f"Quality Gate: Convicción ({signal.confidence*100:.0f}%) inferior al umbral institucional "
+                f"mínimo ({min_required_conf*100:.0f}%). Solo se ejecutan operaciones A+ de alta probabilidad."
+            )
+            return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+
+        # 7. Correlated Crypto Exposure Gatekeeper (Max concurrent crypto positions)
+        if signal.action == OrderSide.BUY and signal.asset_class == AssetClass.CRYPTO:
+            max_crypto_pos = getattr(self.config, "max_concurrent_crypto_positions", 4)
+            crypto_positions_count = sum(1 for p in positions if p.asset_class == AssetClass.CRYPTO and p.quantity > 0)
+            existing_pos = next((p for p in positions if normalize_symbol(p.symbol) == norm_sym), None)
+            if not existing_pos and crypto_positions_count >= max_crypto_pos:
+                rejection_reasons.append(
+                    f"Límite de correlación cripto alcanzado: {crypto_positions_count} activos en cartera "
+                    f"(máx: {max_crypto_pos}). Capital preservado contra riesgo sistémico de mercado."
+                )
+                return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+
+        # 8. Pattern Learning & Mistake Veto (ML4T Continuous Feedback)
         pattern_multiplier = 1.0
         if signal.action == OrderSide.BUY and self.pattern_memory:
             # Check for regime drift / loss fatigue
@@ -256,41 +324,6 @@ class RiskEngine:
                 pattern_multiplier = pattern_check.risk_multiplier
                 warnings.append(pattern_check.warning_message or f"Asignación reducida al {pattern_multiplier*100:.0f}% por similitud con patrón fallido.")
 
-        # 1. Kill-Switch check (daily drawdown) - Blocks new BUYs, but permits protective SELLs
-        if balance.daily_drawdown_pct >= self.config.max_daily_drawdown_pct and signal.action == OrderSide.BUY:
-            rejection_reasons.append(
-                f"Kill-switch active: daily drawdown ({balance.daily_drawdown_pct:.2f}%) "
-                f"exceeds limit ({self.config.max_daily_drawdown_pct:.2f}%). BUY orders prohibited."
-            )
-            return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons)
-
-        # 2. Action check
-        if signal.action == OrderSide.HOLD:
-            return RiskValidationResult(
-                is_approved=False,
-                rejection_reasons=["Trade signal action is HOLD; no execution required."],
-            )
-
-        # 2b. High-Conviction Institutional Quality Gate
-        min_required_conf = getattr(self.config, "min_signal_confidence", 0.0)
-        if signal.action == OrderSide.BUY and min_required_conf > 0 and signal.confidence < min_required_conf:
-            rejection_reasons.append(
-                f"Quality Gate: Convicción ({signal.confidence*100:.0f}%) inferior al umbral institucional "
-                f"mínimo ({min_required_conf*100:.0f}%). Solo se ejecutan operaciones A+ de alta probabilidad."
-            )
-            return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
-
-        # 2c. Correlated Crypto Exposure Gatekeeper (Max concurrent crypto positions)
-        if signal.action == OrderSide.BUY and signal.asset_class == AssetClass.CRYPTO:
-            max_crypto_pos = getattr(self.config, "max_concurrent_crypto_positions", 4)
-            crypto_positions_count = sum(1 for p in positions if p.asset_class == AssetClass.CRYPTO and p.quantity > 0)
-            existing_pos = next((p for p in positions if normalize_symbol(p.symbol) == norm_sym), None)
-            if not existing_pos and crypto_positions_count >= max_crypto_pos:
-                rejection_reasons.append(
-                    f"Límite de correlación cripto alcanzado: {crypto_positions_count} activos en cartera "
-                    f"(máx: {max_crypto_pos}). Capital preservado contra riesgo sistémico de mercado."
-                )
-                return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
 
         # 3. Position check for SELL orders and allocation limits
         existing_position = next((p for p in positions if normalize_symbol(p.symbol) == norm_sym), None)
@@ -368,7 +401,8 @@ class RiskEngine:
         safe_liquidity = max(0.0, available_liquidity * 0.98)
         qty_by_cash = safe_liquidity / current_price
 
-        target_qty = min(qty_by_risk, qty_by_alloc, qty_by_cash) * pattern_multiplier
+        regime_sizing_factor = alloc_factor if 0.0 < alloc_factor < 1.0 else 1.0
+        target_qty = min(qty_by_risk, qty_by_alloc, qty_by_cash) * pattern_multiplier * regime_sizing_factor
 
         # Quantize shares (Equities: integer shares; Crypto: up to 6 decimals)
         if signal.asset_class == AssetClass.EQUITY:

@@ -19,7 +19,10 @@ class BotRiskConfig(BaseModel):
     max_daily_drawdown_pct: float = Field(default=3.0, description="Kill switch threshold for daily loss (3%)")
     default_stop_loss_pct: float = Field(default=2.5, description="Fallback stop loss if LLM provides none (2.5%)")
     max_stop_loss_pct: float = Field(default=4.0, description="Maximum allowable stop loss distance (4.0%)")
-    min_risk_reward_ratio: float = Field(default=2.0, description="Min reward/risk ratio (strictly >= 2.0:1)")
+    min_risk_reward_ratio: float = Field(default=2.5, description="Min reward/risk ratio (strictly >= 2.5:1 for positive mathematical expectancy)")
+    max_overbought_rsi_buy: float = Field(default=64.0, description="Max RSI allowable for BUY entry (anti-bull-trap ceiling)")
+    enable_macro_sma200_filter: bool = Field(default=True, description="Enforce macro 200 SMA trend filter for long positions")
+    enable_defensive_regime_veto: bool = Field(default=True, description="Strictly veto aggressive BUYs during DEFENSIVE_BEAR_BREAKDOWN")
     # QuantConnect LEAN & Freqtrade Precision Enhancements
     enable_trailing_stop: bool = Field(default=True, description="Enable high-water mark trailing stop (QuantConnect LEAN)")
     trailing_stop_activation_pct: float = Field(default=1.2, description="Min profit % before trailing stop activates")

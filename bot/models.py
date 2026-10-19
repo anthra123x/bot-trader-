@@ -88,7 +88,7 @@ class TradeSignal(BaseModel):
     stop_loss: float | None = None
     reasoning: str = ""
     time_horizon_days: int = 5
-    metrics: dict[str, float] = Field(default_factory=dict)
+    metrics: dict[str, Any] = Field(default_factory=dict)
 
 
 class Order(BaseModel):

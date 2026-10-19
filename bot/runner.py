@@ -238,6 +238,16 @@ class BotRunner:
             except Exception:
                 pass
 
+            if reg_obj:
+                screen_res.metrics["regime"] = reg_obj.regime.value
+                screen_res.metrics["allocation_factor"] = reg_obj.allocation_factor
+                if reg_obj.allocation_factor == 0.0 and screen_res.bias == "BUY":
+                    logger.info(
+                        "[REGIME_VETO] 🛡️ %s en %s (Alloc Factor: 0.0). Veto preventivo a compras durante régimen bajista/desplome; capital resguardado en efectivo (0 tokens gastados).",
+                        symbol, reg_obj.regime_display
+                    )
+                    return None
+
             # Gather Quantitative Screener Telemetry
             quant_text = (
                 f"- Quantitative Setup: {screen_res.setup_name} (Bias: {screen_res.bias}, Score: {screen_res.score:.0f}/100)\n"

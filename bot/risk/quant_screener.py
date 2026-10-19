@@ -223,8 +223,11 @@ class QuantScreener:
                     bear_points += 10
                     bear_reasons.append("MACD acelerando negativo")
 
-            # 4. Moving Average Trend Alignment
-            if close > sma50:
+            # 4. Moving Average Trend Alignment (Intermediate SMA-50 & Macro SMA-200)
+            if close > sma50 and close > sma200:
+                bull_points += 20
+                bull_reasons.append("Precio en tendencia alcista macro (sobre SMA-50 y SMA-200)")
+            elif close > sma50:
                 bull_points += 15
                 bull_reasons.append("Precio sobre SMA-50 (soporte alcista)")
             elif close < sma50 and rsi <= self.rsi_oversold:
@@ -234,6 +237,19 @@ class QuantScreener:
             elif close < sma50:
                 bear_points += 15
                 bear_reasons.append("Precio bajo SMA-50 (resistencia bajista)")
+
+            # Palanca B: Macro SMA-200 Filter (Paul Tudor Jones Rule)
+            if close < sma200 and div_type != "BULLISH":
+                if bull_points > bear_points:
+                    bull_points = max(0, bull_points - 25)
+                    bull_reasons.append(f"Aviso Macro: Precio bajo SMA-200 (${sma200:.2f}) sin divergencia alcista")
+
+            # Palanca C: Techo Anti-Trampas (Anti-Bull Trap Ceiling: RSI >= 64.0)
+            if rsi >= 64.0:
+                if bull_points > 0:
+                    bull_points = 0
+                    bear_points += 20
+                    bear_reasons.append(f"Techo Anti-Trampas: RSI ({rsi:.1f} >= 64.0) en sobrecompra; compras anuladas")
 
             # 5. Statistical Divergence Booster (Win Rate Multiplier)
             if div_type == "BULLISH":

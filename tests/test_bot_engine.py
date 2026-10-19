@@ -459,3 +459,105 @@ class TestLeanAndFreqtradeProtections:
         div_type, desc = QuantScreener._detect_divergence(closes, rsis, lookback=5)
         assert div_type == "BULLISH"
         assert "Divergencia Alcista RSI" in desc
+
+    def test_four_master_levers(self):
+        """Validates Palancas A, B, C, D:
+        A: Defensive Regime Veto
+        B: Macro SMA-200 Filter
+        C: Anti-Bull Trap Ceiling (RSI >= 64.0)
+        D: Min Risk/Reward >= 2.5:1
+        """
+        config = BotRiskConfig(
+            min_risk_reward_ratio=2.5,
+            max_overbought_rsi_buy=64.0,
+            enable_macro_sma200_filter=True,
+            enable_defensive_regime_veto=True,
+        )
+        engine = RiskEngine(config)
+        bal = AccountBalance(cash=100_000.0, equity=100_000.0, buying_power=100_000.0)
+
+        # 1. Palanca A: Defensive Regime Veto
+        defensive_signal = TradeSignal(
+            symbol="BTC-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            current_price=80_000.0,
+            stop_loss=78_000.0,
+            take_profit=86_000.0,
+            metrics={"regime": "DEFENSIVE_BEAR_BREAKDOWN", "allocation_factor": 0.0, "rsi": 45.0, "sma200": 70_000.0},
+        )
+        res_a = engine.evaluate(defensive_signal, bal, positions=[])
+        assert res_a.is_approved is False
+        assert any("Veto por Régimen Defensivo" in r for r in res_a.rejection_reasons)
+
+        # 2. Palanca C: Anti-Bull Trap Ceiling (RSI >= 64.0)
+        overbought_signal = TradeSignal(
+            symbol="SOL-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            current_price=100.0,
+            stop_loss=96.0,
+            take_profit=112.0,
+            metrics={"regime": "BULL_TREND", "allocation_factor": 1.0, "rsi": 68.5, "sma200": 90.0},
+        )
+        res_c = engine.evaluate(overbought_signal, bal, positions=[])
+        assert res_c.is_approved is False
+        assert any("Veto Anti-Trampa" in r for r in res_c.rejection_reasons)
+
+        # 3. Palanca B: Macro SMA-200 Filter (Below 200 SMA without bullish divergence)
+        below_sma200_signal = TradeSignal(
+            symbol="ETH-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            current_price=2400.0,
+            stop_loss=2300.0,
+            take_profit=2700.0,
+            metrics={"regime": "CHOPPY_RANGE_BREAKDOWN", "allocation_factor": 0.6, "rsi": 42.0, "sma200": 2600.0, "divergence": "NONE"},
+        )
+        res_b = engine.evaluate(below_sma200_signal, bal, positions=[])
+        assert res_b.is_approved is False
+        assert any("Filtro Macro SMA-200" in r for r in res_b.rejection_reasons)
+
+        # 4. Palanca D: Min Risk/Reward Ratio >= 2.5:1
+        # Risk: $1.00 (40.0 - 39.0), Initial Reward: $1.50 -> R:R = 1.5:1 (fails >= 2.5:1)
+        suboptimal_rr_signal = TradeSignal(
+            symbol="AVAX-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            current_price=40.0,
+            stop_loss=39.0,
+            target_price=41.5,
+            metrics={"regime": "BULL_TREND", "allocation_factor": 1.0, "rsi": 54.0, "sma200": 30.0, "ema_ratio": 1.06, "atr": 0.8},
+        )
+        res_d = engine.evaluate(suboptimal_rr_signal, bal, positions=[])
+        assert res_d.is_approved is True
+        # Verify take profit is automatically elevated to guarantee strictly >= 2.5:1
+        expected_reward = (40.0 - 39.0) * 2.5
+        assert res_d.take_profit_price >= round(40.0 + expected_reward, 2)
+        assert any("elevado asimétricamente a 2.5:1" in w for w in res_d.risk_warnings)
+
+        # 5. Golden Trade: Meets all 4 Master Levers
+        # Risk: $1.50 (40.0 - 38.5), Reward: $5.00 (45.0 - 40.0) -> R:R = 3.33:1, RSI = 54.0, Above SMA200, alloc_factor = 1.0
+        good_signal = TradeSignal(
+            symbol="AVAX-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            current_price=40.0,
+            stop_loss=38.5,
+            take_profit=45.0,
+            metrics={"regime": "BULL_TREND", "allocation_factor": 1.0, "rsi": 54.0, "sma200": 30.0, "ema_ratio": 1.06, "atr": 0.8},
+        )
+        res_good = engine.evaluate(good_signal, bal, positions=[])
+        assert res_good.is_approved is True
+
+
