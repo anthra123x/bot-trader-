@@ -1022,5 +1022,50 @@ class TestLeanAndFreqtradeProtections:
         # 5. Runner extension was registered in RiskEngine
         assert runner.risk_engine.is_runner_extended("NVDA") is True
 
+    def test_profit_quarantine_vault_50_pct(self):
+        """Ensure 50% of cumulative net profit is quarantined into an untouchable cash vault floor."""
+        config = BotRiskConfig(
+            min_cash_reserve_pct=20.0,
+            enable_profit_quarantine_vault=True,
+            profit_quarantine_ratio=0.50,
+        )
+        engine = RiskEngine(config, pattern_memory=PatternMemory(db_path=":memory:"))
+
+        # Starting equity was $100,000. Current equity is $106,000 (+ $6,000 net profit).
+        # Base cash reserve = 20% of $106,000 = $21,200.
+        # Quarantined profit = 50% of $6,000 = $3,000.
+        # Total protected cash floor = $21,200 + $3,000 = $24,200.
+        bal = AccountBalance(cash=25_000.0, equity=106_000.0, buying_power=25_000.0, initial_day_equity=100_000.0)
+
+        total_prot, base_prot, quar = engine.calculate_protected_cash_reserve(bal)
+        assert base_prot == 21_200.0
+        assert quar == 3_000.0
+        assert total_prot == 24_200.0
+
+        # Available cash above floor is only $25,000 - $24,200 = $800.
+        signal = TradeSignal(
+            symbol="BTC-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.85,
+            current_price=60_000.0,
+            stop_loss=58_000.0,
+            metrics={"rsi": 50.0, "ema_ratio": 1.01, "atr": 1000.0},
+        )
+        res = engine.evaluate(signal, bal, positions=[])
+        assert res.is_approved is True
+        assert any("PROFIT_QUARANTINE" in w for w in res.risk_warnings)
+        # Allocation must be strictly bounded by available unquarantined cash ($800)
+        assert res.allocated_capital <= 800.0
+
+        # If cash is at or below $24,200 (e.g. $24,000) -> BUY MUST BE REJECTED to protect quarantined profit!
+        bal_low = AccountBalance(cash=24_000.0, equity=106_000.0, buying_power=24_000.0, initial_day_equity=100_000.0)
+        res_reject = engine.evaluate(signal, bal_low, positions=[])
+        assert res_reject.is_approved is False
+        assert any("bóveda de ganancias 50%" in r for r in res_reject.rejection_reasons)
+
+
 
 

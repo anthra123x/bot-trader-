@@ -78,6 +78,9 @@ class BotRiskConfig(BaseModel):
 
     # Capital Liquidity & Minimum Cash Reserve Floor
     min_cash_reserve_pct: float = Field(default=20.0, description="Minimum percentage of portfolio kept in unencumbered cash (e.g. 20%)")
+    # Profit Quarantine Vault (Untouchable Retained Profit Lockbox - 50%)
+    enable_profit_quarantine_vault: bool = Field(default=True, description="Enable institutional profit quarantine lockbox vault")
+    profit_quarantine_ratio: float = Field(default=0.50, description="Ratio of cumulative net profit quarantined into untouchable cash vault (50%)")
     # Portfolio Aggregate Crypto Exposure Limit (Systemic Risk Control)
     max_total_crypto_allocation_pct: float = Field(default=30.0, description="Max total portfolio allocation across all crypto assets combined (30%)")
     # Portfolio-Level High-Water Mark Trailing Drawdown Protection (Peak Profit Lock)

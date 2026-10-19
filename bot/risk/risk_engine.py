@@ -246,6 +246,21 @@ class RiskEngine:
 
         return False, 0.0, ""
 
+    def calculate_protected_cash_reserve(self, balance: AccountBalance) -> tuple[float, float, float]:
+        """Calculate dynamic protected cash reserve: (total_protected_cash, base_cash_reserve, quarantined_profit).
+        
+        Guarantees that 50% of cumulative net profit is permanently locked into an untouchable cash vault.
+        """
+        min_cash_pct = getattr(self.config, "min_cash_reserve_pct", 20.0)
+        base_cash_reserve = balance.equity * (min_cash_pct / 100.0)
+        quarantined_profit = 0.0
+        if getattr(self.config, "enable_profit_quarantine_vault", True) and balance.initial_day_equity > 0:
+            net_profit = max(0.0, balance.equity - balance.initial_day_equity)
+            quarantine_ratio = getattr(self.config, "profit_quarantine_ratio", 0.50)
+            quarantined_profit = round(net_profit * quarantine_ratio, 4)
+        total_protected = base_cash_reserve + quarantined_profit
+        return total_protected, base_cash_reserve, quarantined_profit
+
     def calculate_trailing_stop(
         self,
         symbol: str,
@@ -389,15 +404,22 @@ class RiskEngine:
                 )
                 return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
 
-        # 2b. Minimum Cash Reserve Floor (Capital Liquidity Protection)
-        min_cash_pct = getattr(self.config, "min_cash_reserve_pct", 20.0)
-        min_cash_reserve = balance.equity * (min_cash_pct / 100.0)
+        # 2b. Minimum Cash Reserve Floor & Profit Quarantine Vault (50% Retained Profit Lockbox)
+        min_cash_reserve, base_cash_reserve, quarantined_profit = self.calculate_protected_cash_reserve(balance)
         available_cash_reserve = max(0.0, balance.cash - min_cash_reserve)
+
+        if quarantined_profit > 0:
+            warnings.append(
+                f"[PROFIT_QUARANTINE] 🏦 Bóveda de Ganancias Activa: ${quarantined_profit:,.2f} "
+                f"(50% de ganancia neta) selladas de forma intocable en efectivo."
+            )
+
         if signal.action == OrderSide.BUY and balance.cash <= min_cash_reserve:
+            min_cash_pct = getattr(self.config, "min_cash_reserve_pct", 20.0)
             rejection_reasons.append(
                 f"Piso de Liquidez / Reserva de Efectivo activa: Efectivo actual (${balance.cash:,.2f}) "
-                f"en o bajo la reserva mínima institucional ({min_cash_pct:.0f}% = ${min_cash_reserve:,.2f}). "
-                f"Compras suspendidas para mantener solvencia y capital de maniobra."
+                f"en o bajo la reserva protegida (${min_cash_reserve:,.2f} = base {min_cash_pct:.0f}% (${base_cash_reserve:,.2f}) + ${quarantined_profit:,.2f} en bóveda de ganancias 50%). "
+                f"Compras suspendidas para blindar las ganancias cosechadas."
             )
             return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
 
