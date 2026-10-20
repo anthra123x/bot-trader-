@@ -342,18 +342,16 @@ class QuantScreener:
                         rationale=f"Altcoin pausada: BTC bajo SMA-50 (${btc_macro.get('btc_price', 0):.2f}) en corrección.",
                     )
 
-            from bot.risk.regime_specialist import REGIME_SPECIALIST
-            regime = REGIME_SPECIALIST.analyze_market_regime("BTC-USD", as_of_date)
-            sl_mult = regime.sl_multiplier
-            tp_mult = regime.tp_multiplier
+            sl_mult = self.atr_multiplier_sl
+            tp_mult = self.atr_multiplier_tp
 
             if bull_points >= self.conviction_threshold and bull_points > bear_points:
                 is_actionable = True
                 bias = "BUY"
                 if div_type == "BULLISH":
-                    setup_name = f"Divergencia Alcista (Alta Probabilidad - {regime.regime_display})"
+                    setup_name = "Divergencia Alcista (Alta Probabilidad)"
                 else:
-                    setup_name = f"Oportunidad Alcista ({regime.regime_display})"
+                    setup_name = "Oportunidad Alcista (Momentum & Soporte)"
                 rationale = " + ".join(bull_reasons)
                 stop_loss = round(close - (atr * sl_mult), 2)
                 take_profit = round(close + (atr * tp_mult), 2)
@@ -361,9 +359,9 @@ class QuantScreener:
                 is_actionable = True
                 bias = "SELL"
                 if div_type == "BEARISH":
-                    setup_name = f"Divergencia Bajista (Reversión - {regime.regime_display})"
+                    setup_name = "Divergencia Bajista (Reversión)"
                 else:
-                    setup_name = f"Reversión Bajista ({regime.regime_display})"
+                    setup_name = "Reversión Bajista (Resistencia)"
                 rationale = " + ".join(bear_reasons)
                 stop_loss = round(close + (atr * sl_mult), 2)
                 take_profit = round(close - (atr * tp_mult), 2)

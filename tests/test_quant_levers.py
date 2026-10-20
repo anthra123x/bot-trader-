@@ -75,8 +75,7 @@ class TestPalancaBMultiTimeframeConfluence:
         assert screener.mtf_penalty_score == 25.0
 
     @patch("bot.risk.quant_screener._verified_rows")
-    @patch("bot.risk.regime_specialist.REGIME_SPECIALIST.analyze_market_regime")
-    def test_screener_mtf_bonus_and_metrics(self, mock_regime, mock_rows):
+    def test_screener_mtf_bonus_and_metrics(self, mock_rows):
         import pandas as pd
         import numpy as np
 
@@ -94,12 +93,6 @@ class TestPalancaBMultiTimeframeConfluence:
             "volume": [10000] * n,
         }, index=dates)
         mock_rows.return_value = df
-
-        mock_reg_obj = MagicMock()
-        mock_reg_obj.sl_multiplier = 1.5
-        mock_reg_obj.tp_multiplier = 3.0
-        mock_reg_obj.regime_display = "TENDENCIA_ALCISTA"
-        mock_regime.return_value = mock_reg_obj
 
         screener = QuantScreener(enable_mtf_confluence=True, conviction_threshold=30.0)
         res = screener.screen("SOL-USD", "2026-10-18")

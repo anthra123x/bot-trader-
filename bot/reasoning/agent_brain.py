@@ -68,6 +68,7 @@ class AgentBrain:
         self.quant_screener = quant_screener or QuantScreener(conviction_threshold=thresh)
         self.institutional_guard = institutional_guard or InstitutionalExecutionGuard(
             cooldown_seconds=self.config.risk.cooldown_period_seconds,
+            risk_engine=self.risk_engine,
         )
         self.execution_simulator = execution_simulator or ExecutionSimulator(
             min_risk_reward_ratio=2.0,

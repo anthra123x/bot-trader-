@@ -52,14 +52,16 @@ class InstitutionalExecutionGuard:
         cooldown_seconds: int = 1800,          # 30-minute cooldown on sequential stop-loss (Freqtrade)
         max_consecutive_losses: int = 2,       # Max consecutive losses before extended lockout
         extended_cooldown_seconds: int = 3600, # 1-hour extended lockout
+        risk_engine: Any = None,
     ):
         self.max_spread_pct = max_spread_pct
         self.max_price_drift_pct = max_price_drift_pct
         self.cooldown_seconds = cooldown_seconds
         self.max_consecutive_losses = max_consecutive_losses
         self.extended_cooldown_seconds = extended_cooldown_seconds
+        self.risk_engine = risk_engine
 
-        # Internal state tracking
+        # Internal state tracking (fallback if risk_engine is not provided)
         self._symbol_cooldowns: dict[str, float] = {}
         self._consecutive_losses: dict[str, int] = {}
         self._order_states: dict[str, OrderState] = {}
@@ -127,6 +129,9 @@ class InstitutionalExecutionGuard:
 
     def register_trade_outcome(self, symbol: str, is_loss: bool) -> None:
         """Register completed trade outcome for dynamic Freqtrade cooldown."""
+        if self.risk_engine and hasattr(self.risk_engine, "register_trade_exit"):
+            self.risk_engine.register_trade_exit(symbol, is_loss=is_loss)
+
         norm = self._normalize(symbol)
         now = time.time()
         if is_loss:
@@ -145,6 +150,10 @@ class InstitutionalExecutionGuard:
 
     def is_in_cooldown(self, symbol: str) -> tuple[bool, float]:
         """Check if symbol is currently in an active Freqtrade cooldown window."""
+        # Single authoritative source of truth: delegate to RiskEngine when available
+        if self.risk_engine and hasattr(self.risk_engine, "is_in_cooldown"):
+            return self.risk_engine.is_in_cooldown(symbol)
+
         norm = self._normalize(symbol)
         now = time.time()
         expiry = self._symbol_cooldowns.get(norm, 0.0)

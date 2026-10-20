@@ -175,6 +175,17 @@ class RiskEngine:
             # Prune events older than 1 hour
             self._recent_stoploss_events = [t for t in self._recent_stoploss_events if now - t < 3600.0]
 
+    def is_in_cooldown(self, symbol: str) -> tuple[bool, float]:
+        """Check if symbol is currently in cooldown after a stop-loss exit (Freqtrade CooldownPeriod)."""
+        norm_sym = normalize_symbol(symbol)
+        now = time.time()
+        if norm_sym in self._symbol_cooldowns:
+            elapsed = now - self._symbol_cooldowns[norm_sym]
+            if elapsed < self.config.cooldown_period_seconds:
+                remaining = self.config.cooldown_period_seconds - elapsed
+                return True, remaining
+        return False, 0.0
+
 
     def evaluate_partial_take_profit(
         self,

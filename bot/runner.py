@@ -776,9 +776,8 @@ class BotRunner:
                     except Exception as pe:
                         logger.debug("Failed to record trade outcome in pattern memory: %s", pe)
 
+                # Unified single source of truth for cooldowns and risk state
                 self.risk_engine.register_trade_exit(p.symbol, is_loss=is_loss)
-                if hasattr(self.brain, "institutional_guard"):
-                    self.brain.institutional_guard.register_trade_outcome(p.symbol, is_loss=is_loss)
 
                 self.notifier.notify_order_execution(executed)
                 try:
