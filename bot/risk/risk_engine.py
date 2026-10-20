@@ -288,6 +288,27 @@ class RiskEngine:
                 return True, remaining
         return False, 0.0
 
+    def get_calibrated_meta_threshold(self) -> tuple[float, str]:
+        """Compute dynamically calibrated Meta-Labeling probability threshold from empirical performance."""
+        base_thresh = getattr(self.config, "min_meta_probability", 0.62)
+        if not hasattr(self, "pattern_memory") or not self.pattern_memory:
+            return base_thresh, "Base estática"
+
+        now = time.time()
+        if hasattr(self, "_meta_calib_cache") and (now - self._meta_calib_cache[0]) < 60.0:
+            return self._meta_calib_cache[1], self._meta_calib_cache[2]
+
+        try:
+            calib = self.pattern_memory.get_empirical_meta_calibration()
+            adj = float(calib.get("threshold_adjustment", 0.0))
+            calibrated = float(np.clip(base_thresh + adj, 0.55, 0.80))
+            reason = calib.get("reason", "Calibración empírica nominal")
+            self._meta_calib_cache = (now, calibrated, reason)
+            return calibrated, reason
+        except Exception as e:
+            logger.debug("Notice calculating empirical meta calibration: %s", e)
+            return base_thresh, "Base fallback"
+
     def evaluate_meta_labeling(
         self,
         signal: TradeSignal,
@@ -298,7 +319,7 @@ class RiskEngine:
         Calculates the estimated probability of trade success P(Success) under current
         microstructure noise, fractal persistence, and volume flow.
         
-        Threshold: P(Success) >= min_meta_probability (default 0.62) to approve trade execution.
+        Threshold: P(Success) >= calibrated_meta_threshold (empirically adapted in real-time).
         """
         if not getattr(self.config, "enable_meta_labeling", True):
             return True, 1.0, ""
@@ -369,7 +390,7 @@ class RiskEngine:
                 pass
 
         p_success = float(np.clip(p_success, 0.05, 0.95))
-        min_prob = getattr(self.config, "min_meta_probability", 0.62)
+        min_prob, calib_reason = self.get_calibrated_meta_threshold()
 
         if p_success < min_prob:
             h_str = f"H={metrics.get('hurst_exponent')}" if 'hurst_exponent' in metrics else ""
@@ -377,12 +398,12 @@ class RiskEngine:
             noise_ctx = f" ({', '.join(filter(None, [h_str, l2_str]))})" if (h_str or l2_str) else ""
             reason = (
                 f"Filtro Meta-Labeling (López de Prado): Probabilidad de éxito estimada "
-                f"P(Success)={p_success:.1%} inferior al umbral mínimo ({min_prob:.1%})"
+                f"P(Success)={p_success:.1%} inferior al umbral calibrado ({min_prob:.1%} - {calib_reason})"
                 f"{noise_ctx}. Falso positivo neutralizado para proteger capital."
             )
             return False, p_success, reason
 
-        return True, p_success, f"Meta-Labeling Aprobado (P(Success)={p_success:.1%})"
+        return True, p_success, f"Meta-Labeling Aprobado (P(Success)={p_success:.1%} >= {min_prob:.1%} - {calib_reason})"
 
 
     def evaluate_partial_take_profit(

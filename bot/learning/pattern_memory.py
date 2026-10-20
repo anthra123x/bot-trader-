@@ -359,6 +359,41 @@ class PatternMemory:
             "recommendation": recommendation,
         }
 
+    def get_empirical_meta_calibration(self) -> dict[str, Any]:
+        """Empirically evaluate recent closed trade performance to calibrate Meta-Labeling threshold."""
+        drift = self.detect_regime_drift(window_size=12)
+        status = drift.get("status", "INSUFFICIENT_HISTORY")
+        win_rate = drift.get("win_rate_pct", 100.0)
+        streak = drift.get("consecutive_losses", 0)
+        sample_size = drift.get("sample_size", 0)
+
+        if sample_size < 3:
+            return {
+                "threshold_adjustment": 0.0,
+                "rolling_win_rate": win_rate,
+                "consecutive_losses": streak,
+                "regime_status": status,
+                "reason": "Historial incipiente (<3 trades). Calibración nominal base.",
+            }
+
+        if status == "DEFENSIVE_QUARANTINE" or win_rate < 45.0 or streak >= 2:
+            adj = +0.07  # Tighten quality gate from 0.62 to 0.69
+            reason = f"Régimen de ruido/corrección (WinRate: {win_rate:.0f}%, Pérdidas seguidas: {streak}). Calibración ajustada a +{adj*100:.0f}% (mayor exigencia de confluencia)."
+        elif win_rate >= 70.0 and streak == 0:
+            adj = -0.04  # Ease slightly from 0.62 to 0.58 to catch more runners
+            reason = f"Régimen de alta persistencia/tendencia (WinRate: {win_rate:.0f}%). Calibración ajustada a {adj*100:.0f}% para maximizar captura de runners."
+        else:
+            adj = 0.0
+            reason = f"Régimen equilibrado (WinRate: {win_rate:.0f}%). Calibración nominal base."
+
+        return {
+            "threshold_adjustment": adj,
+            "rolling_win_rate": win_rate,
+            "consecutive_losses": streak,
+            "regime_status": status,
+            "reason": reason,
+        }
+
     def get_learned_patterns_summary(self) -> dict[str, Any]:
         """Return aggregated summary of learned mistake signatures and positive patterns."""
         with self._get_connection() as conn:

@@ -491,3 +491,45 @@ class TestPrecisionAgainstRandomness:
         engine.register_trade_exit("SOL-USD", is_loss=False)
         assert "SOLUSD" not in engine._symbol_loss_streak
 
+    def test_empirical_meta_labeling_threshold_calibration(self):
+        from bot.learning.pattern_memory import PatternMemory
+        from bot.models import TradeOutcome
+        import uuid
+
+        # Create in-memory pattern memory
+        memory = PatternMemory(db_path=":memory:")
+        config = BotRiskConfig(
+            enable_meta_labeling=True,
+            min_meta_probability=0.62,
+        )
+        engine = RiskEngine(config=config, pattern_memory=memory)
+
+        # 1. Base threshold initially (< 3 trades)
+        base_t, reason = engine.get_calibrated_meta_threshold()
+        assert base_t == 0.62
+
+        # 2. Simulate 3 consecutive losses -> triggers DEFENSIVE_QUARANTINE
+        for sym in ["SOL-USD", "DOGE-USD", "LTC-USD"]:
+            outcome = TradeOutcome(
+                trade_id=str(uuid.uuid4())[:8],
+                symbol=sym,
+                asset_class=AssetClass.CRYPTO,
+                side=OrderSide.BUY,
+                entry_price=100.0,
+                exit_price=97.0,
+                quantity=1.0,
+                pnl_dollars=-3.0,
+                pnl_pct=-3.0,
+                outcome="LOSS",
+                market_regime="CHOPPY_RANGE_BOUND",
+            )
+            memory.record_trade_outcome(outcome)
+
+        # Clear cache to force real-time recalibration
+        engine._meta_calib_cache = (0.0, 0.0, "")
+        tightened_t, reason = engine.get_calibrated_meta_threshold()
+        # Should ratchet UP to ~0.69 (base 0.62 + 0.07)
+        assert tightened_t > 0.62
+        assert tightened_t == pytest.approx(0.69, rel=1e-2)
+        assert "mayor exigencia" in reason
+
