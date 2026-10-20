@@ -120,6 +120,42 @@ class RiskValidationResult(BaseModel):
     risk_warnings: list[str] = Field(default_factory=list)
 
 
+class TradeFeatureSnapshot(BaseModel):
+    """Complete microstructure and technical feature snapshot at trade event time."""
+    # Technical
+    rsi_14: float = 50.0
+    ema_ratio_50: float = 1.0   # price / EMA50
+    ema_ratio_200: float = 1.0  # price / EMA200 
+    atr_pct: float = 2.0
+    band_pct: float = 0.5       # Bollinger band position 0-1
+    
+    # Fractal & Flow
+    hurst_exponent: float = 0.5
+    volume_delta_flow: float = 0.0
+    is_cvd_divergent: bool = False
+    
+    # Microstructure
+    l2_imbalance_ratio: float = 1.0
+    spread_pct: float = 0.05
+    
+    # Regime
+    market_regime: str = "NEUTRAL"
+    prudence_level: str = "BALANCED"
+    fear_greed_value: int = 50
+    sentiment_score: float = 0.0
+    
+    # Context
+    hour_utc: int = 0         # 0-23
+    day_of_week: int = 0      # 0-6
+    mtf_confluence: str = "NEUTRAL"   # ALIGNED/OPPOSED/NEUTRAL
+    screener_score: float = 50.0 # 0-100
+    screener_setup: str = "NONE"
+    
+    # Position sizing context
+    position_pct_of_equity: float = 0.0
+    existing_positions_count: int = 0
+
+
 class TradeOutcome(BaseModel):
     """Result and features of a closed trade for post-mortem feedback and pattern learning."""
     trade_id: str
@@ -140,6 +176,15 @@ class TradeOutcome(BaseModel):
     mistake_signature: str = ""
     lesson_learned: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    # Neural & Microstructure Extension (MAE / MFE / Continuous Reward / Feature Store)
+    mae_dollars: float = 0.0
+    mae_pct: float = 0.0
+    mfe_dollars: float = 0.0
+    mfe_pct: float = 0.0
+    reward_score: float = 0.0
+    exit_reason: str = "MANUAL"
+    features: TradeFeatureSnapshot | None = None
 
 
 class PatternCheckResult(BaseModel):

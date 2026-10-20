@@ -26,6 +26,8 @@ class RiskEngine:
         self.pattern_memory = pattern_memory or PatternMemory()
         # QuantConnect LEAN: High-water mark tracking for trailing stop
         self._peak_prices: dict[str, float] = {}
+        # Neural Feature Store: Trough tracking for MAE (Maximum Adverse Excursion)
+        self._trough_prices: dict[str, float] = {}
         # Freqtrade: Symbol cooldown tracker after exits
         self._symbol_cooldowns: dict[str, float] = {}
         # Freqtrade: Rolling stoploss guard timestamps
@@ -51,6 +53,12 @@ class RiskEngine:
         self._symbol_loss_streak: dict[str, int] = {}
         # Hydrate active positions and risk states from Neon DB / local cache
         self.hydrate_active_positions_state()
+        # Apply Bayesian optimized parameters if available
+        try:
+            from bot.learning.param_optimizer import PARAM_OPTIMIZER
+            PARAM_OPTIMIZER.apply_to_config(self.config)
+        except Exception as oe:
+            logger.debug("[PARAM_OPTIMIZER] Init notice: %s", oe)
 
     def register_order_in_flight(self, symbol: str, quantity: float, price: float, asset_class: AssetClass) -> None:
         """Track newly submitted order in-flight to prevent duplicate rapid pyramiding."""
@@ -93,12 +101,13 @@ class RiskEngine:
             return
 
         state: dict[str, Any] = {}
-        all_symbols = set(self._position_targets.keys()) | set(self._peak_prices.keys()) | set(self._position_entry_times.keys())
+        all_symbols = set(self._position_targets.keys()) | set(self._peak_prices.keys()) | set(self._trough_prices.keys()) | set(self._position_entry_times.keys())
         for sym in all_symbols:
             norm_sym = normalize_symbol(sym)
             targets = self._position_targets.get(norm_sym, {})
             state[norm_sym] = {
                 "peak_price": self._peak_prices.get(norm_sym, 0.0),
+                "trough_price": self._trough_prices.get(norm_sym, 0.0),
                 "tp_stage": self._partial_tp_stages.get(norm_sym, 0),
                 "partial_tp_executed": norm_sym in self._partial_tp_executed,
                 "runner_extended": norm_sym in self._runner_extended,
@@ -184,6 +193,8 @@ class RiskEngine:
 
             if data.get("peak_price", 0.0) > 0:
                 self._peak_prices[norm_sym] = float(data["peak_price"])
+            if data.get("trough_price", 0.0) > 0:
+                self._trough_prices[norm_sym] = float(data["trough_price"])
             if data.get("tp_stage", 0) > 0:
                 self._partial_tp_stages[norm_sym] = int(data["tp_stage"])
             if data.get("partial_tp_executed"):
@@ -217,8 +228,10 @@ class RiskEngine:
     def register_entry_context(self, symbol: str, context: dict[str, Any]) -> None:
         """Register technical metrics at entry for post-trade feedback and learning."""
         norm_sym = normalize_symbol(symbol)
-        self.entry_contexts[norm_sym] = context
-        self.entry_contexts[symbol] = context
+        existing = self.entry_contexts.get(norm_sym) or self.entry_contexts.get(symbol) or {}
+        merged = {**existing, **context}
+        self.entry_contexts[norm_sym] = merged
+        self.entry_contexts[symbol] = merged
         self.save_active_positions_state()
 
     def get_entry_context(self, symbol: str) -> dict[str, Any]:
@@ -308,6 +321,8 @@ class RiskEngine:
         norm_sym = normalize_symbol(symbol)
         self._peak_prices.pop(norm_sym, None)
         self._peak_prices.pop(symbol, None)
+        self._trough_prices.pop(norm_sym, None)
+        self._trough_prices.pop(symbol, None)
         self._partial_tp_executed.discard(norm_sym)
         self._partial_tp_executed.discard(symbol)
         self._partial_tp_stages.pop(norm_sym, None)
@@ -343,7 +358,7 @@ class RiskEngine:
         self.save_active_positions_state()
 
     def register_position_entry(self, symbol: str, entry_price: float = 0.0, timestamp: float | None = None) -> None:
-        """Record entry timestamp for position duration tracking."""
+        """Record entry timestamp and initial price extremes for position excursion tracking."""
         norm_sym = normalize_symbol(symbol)
         ts = timestamp if timestamp is not None and timestamp > 0 else time.time()
         self._position_entry_times[norm_sym] = ts
@@ -352,7 +367,52 @@ class RiskEngine:
             peak = max(self._peak_prices.get(norm_sym, entry_price), entry_price)
             self._peak_prices[norm_sym] = peak
             self._peak_prices[symbol] = peak
+            trough = min(self._trough_prices.get(norm_sym, entry_price), entry_price)
+            self._trough_prices[norm_sym] = trough
+            self._trough_prices[symbol] = trough
         self.save_active_positions_state()
+
+    def update_position_extremes(self, symbol: str, current_price: float, entry_price: float = 0.0) -> None:
+        """Update ongoing high-water mark (peak) and low-water mark (trough) for MAE/MFE calculation."""
+        if current_price <= 0:
+            return
+        norm_sym = normalize_symbol(symbol)
+        base_ref = entry_price if entry_price > 0 else current_price
+        peak = max(self._peak_prices.get(norm_sym, self._peak_prices.get(symbol, base_ref)), current_price)
+        self._peak_prices[norm_sym] = peak
+        self._peak_prices[symbol] = peak
+        trough = min(self._trough_prices.get(norm_sym, self._trough_prices.get(symbol, base_ref)), current_price)
+        self._trough_prices[norm_sym] = trough
+        self._trough_prices[symbol] = trough
+
+    def get_position_excursions(
+        self,
+        symbol: str,
+        entry_price: float,
+        current_price: float,
+        quantity: float = 1.0,
+    ) -> dict[str, float]:
+        """Compute Maximum Adverse Excursion (MAE) and Maximum Favorable Excursion (MFE)."""
+        norm_sym = normalize_symbol(symbol)
+        safe_entry = max(entry_price, 0.0001)
+        safe_qty = max(quantity, 0.0)
+
+        peak = max(self._peak_prices.get(norm_sym, self._peak_prices.get(symbol, safe_entry)), current_price, safe_entry)
+        trough = min(self._trough_prices.get(norm_sym, self._trough_prices.get(symbol, safe_entry)), current_price, safe_entry)
+
+        mfe_dollars = max(0.0, (peak - safe_entry) * safe_qty)
+        mfe_pct = max(0.0, ((peak - safe_entry) / safe_entry) * 100.0)
+        mae_dollars = max(0.0, (safe_entry - trough) * safe_qty)
+        mae_pct = max(0.0, ((safe_entry - trough) / safe_entry) * 100.0)
+
+        return {
+            "mae_dollars": round(mae_dollars, 4),
+            "mae_pct": round(mae_pct, 4),
+            "mfe_dollars": round(mfe_dollars, 4),
+            "mfe_pct": round(mfe_pct, 4),
+            "peak_price": round(peak, 4),
+            "trough_price": round(trough, 4),
+        }
 
     def get_position_duration_hours(self, symbol: str) -> float:
         """Return the holding duration in hours for a symbol, or 0.0 if not tracked."""
@@ -478,47 +538,13 @@ class RiskEngine:
         if not metrics or ("hurst_exponent" not in metrics and "volume_delta_flow" not in metrics and "l2_imbalance_ratio" not in metrics):
             return True, 0.75, "Meta-labeling passthrough (no microstructure metrics provided)"
 
-        p_success = 0.50  # Prior probability
+        from bot.learning.adaptive_model import ADAPTIVE_MODEL
+        p_success, model_source = ADAPTIVE_MODEL.predict_p_success(
+            signal=signal,
+            market_regime=market_regime,
+        )
 
-        # 1. Multi-Agent / Screener Signal Conviction
-        sig_conf = float(signal.confidence) if signal.confidence else 0.50
-        p_success += (sig_conf - 0.50) * 0.25
-
-        # 2. Fractal Noise / Hurst Exponent Memory
-        if "hurst_exponent" in metrics:
-            h_val = float(metrics["hurst_exponent"])
-            if h_val >= 0.56:
-                p_success += 0.12  # Strong persistent statistical memory
-            elif h_val >= 0.52:
-                p_success += 0.05
-            elif h_val < 0.48:
-                p_success -= 0.15  # Pure Brownian noise / Random walk penalty
-
-        # 3. Cumulative Volume Delta Flow (CVD)
-        if "volume_delta_flow" in metrics:
-            cvd_flow = float(metrics["volume_delta_flow"])
-            is_cvd_divergent = bool(metrics.get("is_cvd_divergent", 0.0))
-            if is_cvd_divergent:
-                p_success -= 0.18  # Trap exhaustion divergence
-            elif cvd_flow > 0.20:
-                p_success += 0.10  # Institutional volume accumulation
-
-        # 4. Level 2 Order Book Depth Imbalance
-        if "l2_imbalance_ratio" in metrics:
-            l2_ratio = float(metrics["l2_imbalance_ratio"])
-            if l2_ratio >= 1.25:
-                p_success += 0.08  # Bullish buyer absorption
-            elif l2_ratio <= 0.60:
-                p_success -= 0.15  # Seller overhang resistance
-
-        # 5. Market Regime
-        reg_upper = market_regime.upper()
-        if "BEAR" in reg_upper or "DEFENSIVE" in reg_upper:
-            p_success -= 0.20
-        elif "TRENDING_BULL" in reg_upper:
-            p_success += 0.08
-
-        # 6. Pattern Memory Loss Similarity
+        # Pattern Memory Loss Similarity check
         if hasattr(self, "pattern_memory") and self.pattern_memory:
             try:
                 rsi_val = float(metrics.get("rsi", 50.0))
@@ -531,9 +557,9 @@ class RiskEngine:
                     ema_ratio=ema_ratio,
                     atr_pct=atr_pct,
                 )
-                if not pcheck.is_approved:
+                if not pcheck.is_safe:
                     p_success -= 0.25
-                elif pcheck.suggested_multiplier < 1.0:
+                elif pcheck.risk_multiplier < 1.0:
                     p_success -= 0.10
             except Exception:
                 pass
@@ -546,13 +572,13 @@ class RiskEngine:
             l2_str = f"L2={metrics.get('l2_imbalance_ratio')}x" if 'l2_imbalance_ratio' in metrics else ""
             noise_ctx = f" ({', '.join(filter(None, [h_str, l2_str]))})" if (h_str or l2_str) else ""
             reason = (
-                f"Filtro Meta-Labeling (López de Prado): Probabilidad de éxito estimada "
+                f"Filtro Meta-Labeling [{model_source}]: Probabilidad de éxito estimada "
                 f"P(Success)={p_success:.1%} inferior al umbral calibrado ({min_prob:.1%} - {calib_reason})"
                 f"{noise_ctx}. Falso positivo neutralizado para proteger capital."
             )
             return False, p_success, reason
 
-        return True, p_success, f"Meta-Labeling Aprobado (P(Success)={p_success:.1%} >= {min_prob:.1%} - {calib_reason})"
+        return True, p_success, f"Meta-Labeling Aprobado [{model_source}] (P(Success)={p_success:.1%} >= {min_prob:.1%} - {calib_reason})"
 
 
     def evaluate_partial_take_profit(
@@ -694,11 +720,14 @@ class RiskEngine:
         if not self.config.enable_trailing_stop or current_price <= 0 or entry_price <= 0:
             return current_stop_loss, False
 
-        # 1. Update high-water mark peak price
+        # 1. Update high-water mark peak and trough price
         norm_sym = normalize_symbol(symbol)
         peak = max(self._peak_prices.get(norm_sym, self._peak_prices.get(symbol, entry_price)), current_price)
         self._peak_prices[norm_sym] = peak
         self._peak_prices[symbol] = peak
+        trough = min(self._trough_prices.get(norm_sym, self._trough_prices.get(symbol, entry_price)), current_price)
+        self._trough_prices[norm_sym] = trough
+        self._trough_prices[symbol] = trough
 
         # 2. Check Freqtrade Trailing Stop & Break-Even Ratchet
         unrealized_profit_pct = ((peak - entry_price) / entry_price) * 100.0
@@ -1146,7 +1175,43 @@ class RiskEngine:
                 )
 
         regime_sizing_factor = alloc_factor if 0.0 < alloc_factor < 1.0 else 1.0
-        target_qty = min(qty_by_risk, qty_by_alloc, qty_by_cash) * pattern_multiplier * regime_sizing_factor * prudence_multiplier * l2_multiplier
+
+        # Portfolio Intelligence: Check overall portfolio health and circuit breakers
+        portfolio_health_mult = 1.0
+        asset_alloc_mult = 1.0
+        try:
+            from bot.learning.portfolio_intelligence import PORTFOLIO_INTELLIGENCE
+            if hasattr(self, "pattern_memory") and self.pattern_memory:
+                records = self.pattern_memory.get_historical_feature_matrix(limit=50)
+                if records:
+                    health = PORTFOLIO_INTELLIGENCE.compute_metrics(records)
+                    portfolio_health_mult = health.sizing_multiplier
+                    if health.health_status == "HALT_RECOMMENDED":
+                        halt_msg = health.warnings[0] if health.warnings else "Riesgo excesivo de cartera"
+                        rejection_reasons.append(
+                            f"Circuit Breaker de Cartera: Salud crítica ({halt_msg}). Operaciones pausadas preventivamente."
+                        )
+                        return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+                    elif health.health_status == "DEGRADED":
+                        warnings.append(f"[PORTFOLIO_INTELLIGENCE] ⚠️ Rendimiento degradado: Sizing global al {portfolio_health_mult * 100:.0f}%.")
+
+                    asset_alloc_mult = PORTFOLIO_INTELLIGENCE.get_symbol_allocation_multiplier(signal.symbol)
+                    if asset_alloc_mult > 1.0:
+                        warnings.append(f"[PORTFOLIO_INTELLIGENCE] 🚀 Alpha Edge confirmado para {signal.symbol}: Asignación amplificada {asset_alloc_mult:.2f}x.")
+                    elif asset_alloc_mult < 1.0:
+                        warnings.append(f"[PORTFOLIO_INTELLIGENCE] 🛡️ Drawdown histórico en {signal.symbol}: Asignación reducida a {asset_alloc_mult:.2f}x.")
+        except Exception as pie:
+            logger.debug("[PORTFOLIO_INTELLIGENCE] Notice en evaluación: %s", pie)
+
+        target_qty = (
+            min(qty_by_risk, qty_by_alloc, qty_by_cash)
+            * pattern_multiplier
+            * regime_sizing_factor
+            * prudence_multiplier
+            * l2_multiplier
+            * portfolio_health_mult
+            * asset_alloc_mult
+        )
 
         # Quantize shares (Equities: integer shares; Crypto: up to 6 decimals)
         if signal.asset_class == AssetClass.EQUITY:

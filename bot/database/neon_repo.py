@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Generator
@@ -34,6 +35,8 @@ class NeonRepository:
         )
         self.pool: ThreadedConnectionPool | None = None
         self._is_enabled = bool(self.database_url)
+        self._last_connect_attempt = 0.0
+        self._connect_retry_cooldown = 60.0
 
         if self._is_enabled:
             self._init_pool()
@@ -44,6 +47,7 @@ class NeonRepository:
         """Initialize the PostgreSQL connection pool."""
         if not self.database_url:
             return
+        self._last_connect_attempt = time.time()
         try:
             # Min 2, Max 25 connections for background agents, web requests, and burst traffic
             self.pool = ThreadedConnectionPool(
@@ -61,7 +65,10 @@ class NeonRepository:
     def get_connection(self) -> Generator[psycopg2.extensions.connection, None, None]:
         """Context manager to safely acquire, yield, and return a connection to the pool."""
         if not self.pool:
-            # Attempt lazy reconnection if pool was dropped
+            now = time.time()
+            if (now - self._last_connect_attempt) < self._connect_retry_cooldown:
+                raise RuntimeError("Neon database connection pool is not available (cooling down).")
+            # Attempt lazy reconnection if cooldown elapsed
             self._init_pool()
             if not self.pool:
                 raise RuntimeError("Neon database connection pool is not available.")
@@ -441,6 +448,11 @@ class NeonRepository:
                         row_dict = dict(r)
                         if isinstance(row_dict.get("created_at"), datetime):
                             row_dict["created_at"] = row_dict["created_at"].isoformat()
+                        if isinstance(row_dict.get("metrics"), str):
+                            try:
+                                row_dict["metrics"] = json.loads(row_dict["metrics"])
+                            except Exception:
+                                pass
                         result.append(row_dict)
                     return result
         except Exception as e:

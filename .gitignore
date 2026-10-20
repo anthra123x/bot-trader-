@@ -225,5 +225,8 @@ data/*.db*
 *.db
 *.db-shm
 *.db-wal
+data/*.lgb
+data/*.json
+data/
 .vercel
 .env*

@@ -8,6 +8,7 @@ and used to veto or downscale prospective trades matching known loss patterns.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import os
@@ -64,9 +65,36 @@ class PatternMemory:
                     market_regime TEXT NOT NULL,
                     mistake_signature TEXT,
                     lesson_learned TEXT,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    mae_dollars REAL DEFAULT 0.0,
+                    mae_pct REAL DEFAULT 0.0,
+                    mfe_dollars REAL DEFAULT 0.0,
+                    mfe_pct REAL DEFAULT 0.0,
+                    reward_score REAL DEFAULT 0.0,
+                    exit_reason TEXT DEFAULT 'MANUAL',
+                    duration_hours REAL DEFAULT 0.0,
+                    features_json TEXT
                 )
             """)
+            # Automatic schema migration for preexisting SQLite databases
+            try:
+                cursor = conn.execute("PRAGMA table_info(trade_patterns)")
+                existing_cols = {row["name"] for row in cursor.fetchall()}
+                new_columns = [
+                    ("mae_dollars", "REAL DEFAULT 0.0"),
+                    ("mae_pct", "REAL DEFAULT 0.0"),
+                    ("mfe_dollars", "REAL DEFAULT 0.0"),
+                    ("mfe_pct", "REAL DEFAULT 0.0"),
+                    ("reward_score", "REAL DEFAULT 0.0"),
+                    ("exit_reason", "TEXT DEFAULT 'MANUAL'"),
+                    ("duration_hours", "REAL DEFAULT 0.0"),
+                    ("features_json", "TEXT"),
+                ]
+                for col_name, col_def in new_columns:
+                    if col_name not in existing_cols:
+                        conn.execute(f"ALTER TABLE trade_patterns ADD COLUMN {col_name} {col_def}")
+            except Exception as me:
+                logger.debug("Notice during SQLite schema migration: %s", me)
             conn.commit()
 
     @staticmethod
@@ -124,19 +152,23 @@ class PatternMemory:
             outcome.mistake_signature = sig
             outcome.lesson_learned = lesson
 
+        features_dict = outcome.features.model_dump() if outcome.features else None
+        features_json_str = json.dumps(features_dict) if features_dict else None
+
         with self._get_connection() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO trade_patterns (
                     trade_id, symbol, asset_class, side, entry_price, exit_price,
                     quantity, pnl_dollars, pnl_pct, outcome, rsi_entry, ema_ratio,
                     volatility_atr_pct, market_regime, mistake_signature,
-                    lesson_learned, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    lesson_learned, created_at, mae_dollars, mae_pct, mfe_dollars,
+                    mfe_pct, reward_score, exit_reason, duration_hours, features_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 outcome.trade_id,
                 outcome.symbol,
-                outcome.asset_class.value,
-                outcome.side.value,
+                outcome.asset_class.value if hasattr(outcome.asset_class, "value") else str(outcome.asset_class),
+                outcome.side.value if hasattr(outcome.side, "value") else str(outcome.side),
                 outcome.entry_price,
                 outcome.exit_price,
                 outcome.quantity,
@@ -150,6 +182,14 @@ class PatternMemory:
                 outcome.mistake_signature,
                 outcome.lesson_learned,
                 outcome.created_at.isoformat(),
+                outcome.mae_dollars,
+                outcome.mae_pct,
+                outcome.mfe_dollars,
+                outcome.mfe_pct,
+                outcome.reward_score,
+                outcome.exit_reason,
+                outcome.duration_hours,
+                features_json_str,
             ))
             conn.commit()
 
@@ -168,6 +208,14 @@ class PatternMemory:
                 "rsi_entry": outcome.rsi_entry,
                 "ema_ratio": outcome.ema_ratio,
                 "volatility_atr_pct": outcome.volatility_atr_pct,
+                "mae_dollars": outcome.mae_dollars,
+                "mae_pct": outcome.mae_pct,
+                "mfe_dollars": outcome.mfe_dollars,
+                "mfe_pct": outcome.mfe_pct,
+                "reward_score": outcome.reward_score,
+                "exit_reason": outcome.exit_reason,
+                "duration_hours": outcome.duration_hours,
+                "features": features_dict,
             }
             neon_repo.save_learned_pattern(
                 regime=outcome.market_regime,
@@ -185,6 +233,23 @@ class PatternMemory:
             "Registered trade pattern [%s] for %s: %s (PnL: %.2f%%)",
             outcome.outcome, outcome.symbol, outcome.mistake_signature, outcome.pnl_pct
         )
+
+        # Online Evolution: Retrain AdaptiveModel, update Portfolio Intelligence & Bayesian Optimizer
+        try:
+            matrix = self.get_historical_feature_matrix(limit=500)
+            if len(matrix) >= 10:
+                from bot.learning.portfolio_intelligence import PORTFOLIO_INTELLIGENCE
+                PORTFOLIO_INTELLIGENCE.compute_metrics(matrix)
+
+            if len(matrix) >= 25:
+                from bot.learning.adaptive_model import ADAPTIVE_MODEL
+                ADAPTIVE_MODEL.train_on_history(matrix)
+
+            if len(matrix) >= 20 and len(matrix) % 10 == 0:
+                from bot.learning.param_optimizer import PARAM_OPTIMIZER
+                PARAM_OPTIMIZER.optimize_parameters(matrix, n_trials=35)
+        except Exception as ae:
+            logger.debug("[EVOLUTION] Online loop notice: %s", ae)
 
     def evaluate_setup(
         self,
@@ -436,3 +501,32 @@ class PatternMemory:
             ],
             "drift_metrics": self.detect_regime_drift(),
         }
+
+    def get_historical_feature_matrix(self, limit: int = 500) -> list[dict[str, Any]]:
+        """Retrieve historical trades with full feature snapshots and rewards for ML training."""
+        records: list[dict[str, Any]] = []
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute("""
+                    SELECT trade_id, symbol, outcome, pnl_pct, reward_score,
+                           rsi_entry, ema_ratio, volatility_atr_pct, market_regime,
+                           mae_pct, mfe_pct, exit_reason, duration_hours, features_json,
+                           created_at
+                    FROM trade_patterns
+                    ORDER BY created_at ASC
+                    LIMIT ?
+                """, (limit,)).fetchall()
+                for r in rows:
+                    rec = dict(r)
+                    if rec.get("features_json"):
+                        try:
+                            rec["features"] = json.loads(rec["features_json"])
+                        except Exception:
+                            rec["features"] = {}
+                    else:
+                        rec["features"] = {}
+                    records.append(rec)
+        except Exception as e:
+            logger.debug("Failed to fetch historical feature matrix: %s", e)
+        return records
+

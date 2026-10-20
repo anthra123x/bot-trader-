@@ -541,3 +541,78 @@ class QuantScreener:
                 metrics={},
                 rationale=str(e),
             )
+
+    def screen_universe_parallel(
+        self,
+        symbols: list[str],
+        as_of_date: str,
+        max_workers: int = 8,
+    ) -> list[tuple[str, QuantScreenResult]]:
+        """Screen a universe of symbols concurrently using ThreadPoolExecutor.
+        
+        Releases Python GIL during I/O market data fetching and numpy calculations.
+        Pre-warms BTC macro health in memory so all altcoin threads hit cache instantly (<1ms).
+        """
+        if not symbols:
+            return []
+
+        # Deduplicate preserving order
+        unique_symbols = list(dict.fromkeys(symbols))
+
+        # Pre-warm BTC macro health cache once
+        try:
+            self.get_btc_macro_health(as_of_date)
+        except Exception:
+            pass
+
+        import concurrent.futures
+        workers = min(len(unique_symbols), max(1, max_workers))
+        results: list[tuple[str, QuantScreenResult]] = []
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_to_sym = {
+                executor.submit(self.screen, sym, as_of_date): sym
+                for sym in unique_symbols
+            }
+            for future in concurrent.futures.as_completed(future_to_sym):
+                sym = future_to_sym[future]
+                try:
+                    res = future.result()
+                    results.append((sym, res))
+                except Exception as exc:
+                    logger.debug("[PARALLEL_SCREENER] Error on %s: %s", sym, exc)
+                    results.append((
+                        sym,
+                        QuantScreenResult(
+                            symbol=sym,
+                            is_actionable=False,
+                            bias="NEUTRAL",
+                            score=0.0,
+                            setup_name="Error / Fallback",
+                            current_price=0.0,
+                            suggested_stop_loss=0.0,
+                            suggested_take_profit=0.0,
+                            risk_reward_ratio=2.0,
+                            metrics={},
+                            rationale=str(exc),
+                        ),
+                    ))
+
+        return results
+
+    async def screen_universe_async(
+        self,
+        symbols: list[str],
+        as_of_date: str,
+        max_workers: int = 8,
+    ) -> list[tuple[str, QuantScreenResult]]:
+        """Asynchronous wrapper for parallel universe screening."""
+        import asyncio
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            self.screen_universe_parallel,
+            symbols,
+            as_of_date,
+            max_workers,
+        )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -236,13 +237,28 @@ class BotRunner:
         executed_order = self.broker.submit_order(order)
         if action == OrderSide.BUY:
             if hasattr(self.risk_engine, "register_entry_context"):
-                self.risk_engine.register_entry_context(symbol, {
+                full_entry_ctx = dict(signal.metrics or {})
+                now_utc = datetime.now(timezone.utc)
+                pos_val = risk_result.adjusted_quantity * current_price
+                tot_eq = balance.equity if hasattr(balance, "equity") and balance.equity > 0 else 1.0
+                full_entry_ctx.update({
                     "rsi": float(signal.metrics.get("rsi", 50.0)),
                     "ema_ratio": float(signal.metrics.get("ema_ratio", 1.0)),
                     "atr": float(signal.metrics.get("atr", current_price * 0.02)),
+                    "atr_pct": float(signal.metrics.get("atr_pct", 2.0)),
                     "confidence": signal.confidence,
                     "regime": current_regime_name,
+                    "market_prudence": signal.metrics.get("market_prudence", "BALANCED"),
+                    "hour_utc": now_utc.hour,
+                    "day_of_week": now_utc.weekday(),
+                    "position_pct_of_equity": round((pos_val / tot_eq) * 100.0, 2),
+                    "existing_positions_count": len(positions) if positions else 0,
+                    "entry_price": current_price,
+                    "quantity": risk_result.adjusted_quantity,
+                    "stop_loss_price": risk_result.stop_loss_price,
+                    "take_profit_price": risk_result.take_profit_price,
                 })
+                self.risk_engine.register_entry_context(symbol, full_entry_ctx)
             if hasattr(self.risk_engine, "register_order_in_flight"):
                 self.risk_engine.register_order_in_flight(symbol, risk_result.adjusted_quantity, current_price, asset_class)
             if hasattr(self.risk_engine, "register_position_entry"):
@@ -255,7 +271,12 @@ class BotRunner:
             logger.warning("[NEON] Could not save order to Neon: %s", e)
         return executed_order
 
-    def run_symbol(self, symbol: str, trade_date: str | None = None) -> Order | None:
+    def run_symbol(
+        self,
+        symbol: str,
+        trade_date: str | None = None,
+        pre_screen_res: QuantScreenResult | None = None,
+    ) -> Order | None:
         """Run full cycle: Algorithmic Quant Screener -> Multi-Agent Validation -> Risk -> Execution."""
         date = trade_date or get_current_date()
 
@@ -268,7 +289,7 @@ class BotRunner:
             return None
 
         # Step 1: Deterministic Algorithmic Quant Screening (< 40ms, 0 tokens)
-        screen_res = self.quant_screener.screen(symbol, date)
+        screen_res = pre_screen_res or self.quant_screener.screen(symbol, date)
         if not screen_res.is_actionable:
             logger.info(
                 "[QUANT_SCREENER] ⏸️ %s en %s (Puntaje: %.0f/100, RSI: %.1f). Mercado neutral; capital resguardado (0 tokens gastados).",
@@ -496,6 +517,130 @@ class BotRunner:
 
         return None
 
+    def _record_trade_outcome_helper(
+        self,
+        symbol: str,
+        asset_class: AssetClass,
+        entry_price: float,
+        exit_price: float,
+        quantity: float,
+        pnl_dollars: float,
+        pnl_pct: float,
+        outcome_str: str,
+        exit_reason: str,
+        order_id: str | None = None,
+        existing_positions_count: int = 0,
+    ) -> None:
+        """Helper to compute excursions, continuous reward, feature snapshot, and record TradeOutcome in PatternMemory."""
+        if not hasattr(self.risk_engine, "pattern_memory") or not self.risk_engine.pattern_memory:
+            return
+
+        try:
+            from bot.learning.reward_calculator import REWARD_CALCULATOR
+            from bot.models import TradeFeatureSnapshot, TradeOutcome
+            from bot.risk.regime_specialist import REGIME_SPECIALIST
+
+            norm_sym = symbol.replace("/", "-")
+            try:
+                regime_obj = REGIME_SPECIALIST.analyze_market_regime(norm_sym)
+                regime_name = regime_obj.regime.value
+                prudence_level = regime_obj.prudence.value
+                sentiment_score = getattr(regime_obj.web_sentiment, "sentiment_score", 0.0) if regime_obj.web_sentiment else 0.0
+                fear_greed = getattr(regime_obj.web_sentiment, "fear_greed_value", 50) if regime_obj.web_sentiment else 50
+            except Exception:
+                regime_name = "NEUTRAL"
+                prudence_level = "BALANCED"
+                sentiment_score = 0.0
+                fear_greed = 50
+
+            entry_ctx = self.risk_engine.get_entry_context(symbol) if hasattr(self.risk_engine, "get_entry_context") else {}
+            rsi_entry = float(entry_ctx.get("rsi", 50.0))
+            ema_ratio = float(entry_ctx.get("ema_ratio", 1.0))
+            atr_val = float(entry_ctx.get("atr", entry_price * 0.02))
+            atr_pct = float(entry_ctx.get("atr_pct", (atr_val / entry_price * 100.0) if entry_price > 0 else 2.0))
+
+            # Excursion analysis (MAE & MFE)
+            excursions = (
+                self.risk_engine.get_position_excursions(symbol, entry_price, exit_price, quantity)
+                if hasattr(self.risk_engine, "get_position_excursions")
+                else {"mae_dollars": 0.0, "mae_pct": 0.0, "mfe_dollars": 0.0, "mfe_pct": 0.0}
+            )
+
+            # Holding duration
+            duration_hrs = (
+                self.risk_engine.get_position_duration_hours(symbol)
+                if hasattr(self.risk_engine, "get_position_duration_hours")
+                else 0.0
+            )
+
+            # Continuous reward calculation
+            reward_score = REWARD_CALCULATOR.calculate(
+                pnl_pct=pnl_pct,
+                volatility_atr_pct=atr_pct,
+                mae_pct=excursions.get("mae_pct", 0.0),
+                mfe_pct=excursions.get("mfe_pct", 0.0),
+                stop_loss_pct=getattr(self.config.risk, "default_stop_loss_pct", 2.5),
+                duration_hours=duration_hrs,
+            )
+
+            # Build enriched sensory snapshot
+            now_utc = datetime.now(timezone.utc)
+            snapshot = TradeFeatureSnapshot(
+                rsi_14=rsi_entry,
+                ema_ratio_50=ema_ratio,
+                ema_ratio_200=float(entry_ctx.get("ema_ratio_200", 1.0)),
+                atr_pct=atr_pct,
+                band_pct=float(entry_ctx.get("band_pct", 0.5)),
+                hurst_exponent=float(entry_ctx.get("hurst_exponent", 0.5)),
+                volume_delta_flow=float(entry_ctx.get("volume_delta_flow", 0.0)),
+                is_cvd_divergent=bool(entry_ctx.get("is_cvd_divergent", False)),
+                l2_imbalance_ratio=float(entry_ctx.get("l2_imbalance_ratio", 1.0)),
+                spread_pct=float(entry_ctx.get("spread_pct", 0.05)),
+                market_regime=regime_name,
+                prudence_level=prudence_level,
+                fear_greed_value=fear_greed,
+                sentiment_score=sentiment_score,
+                hour_utc=int(entry_ctx.get("hour_utc", now_utc.hour)),
+                day_of_week=int(entry_ctx.get("day_of_week", now_utc.weekday())),
+                mtf_confluence=str(entry_ctx.get("mtf_confluence", "NEUTRAL")),
+                screener_score=float(entry_ctx.get("screener_score", 50.0)),
+                screener_setup=str(entry_ctx.get("screener_setup", "NONE")),
+                position_pct_of_equity=float(entry_ctx.get("position_pct_of_equity", 0.0)),
+                existing_positions_count=existing_positions_count,
+            )
+
+            outcome = TradeOutcome(
+                trade_id=order_id or str(uuid.uuid4())[:8],
+                symbol=symbol,
+                asset_class=asset_class,
+                side=OrderSide.BUY,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                quantity=quantity,
+                pnl_dollars=pnl_dollars,
+                pnl_pct=pnl_pct,
+                outcome=outcome_str,
+                duration_hours=duration_hrs,
+                rsi_entry=rsi_entry,
+                ema_ratio=ema_ratio,
+                volatility_atr_pct=atr_pct,
+                market_regime=regime_name,
+                mae_dollars=excursions.get("mae_dollars", 0.0),
+                mae_pct=excursions.get("mae_pct", 0.0),
+                mfe_dollars=excursions.get("mfe_dollars", 0.0),
+                mfe_pct=excursions.get("mfe_pct", 0.0),
+                reward_score=reward_score,
+                exit_reason=exit_reason,
+                features=snapshot,
+            )
+            self.risk_engine.pattern_memory.record_trade_outcome(outcome)
+            logger.info(
+                "[NEURAL_FEEDBACK] 🧠 %s TradeOutcome catalogado: %s (%s) | PnL: %+.2f%% | Reward: %+.4f | MAE: %.2f%% | MFE: %.2f%%",
+                symbol, outcome_str, exit_reason, pnl_pct, reward_score, outcome.mae_pct, outcome.mfe_pct
+            )
+        except Exception as pe:
+            logger.debug("Failed to record trade outcome in neural feedback: %s", pe)
+
     def manage_open_positions(self) -> list[Order]:
         """QuantConnect LEAN Trailing Stop & Position Manager.
         
@@ -563,6 +708,8 @@ class BotRunner:
                 curr_price = p.current_price or p.entry_price
 
             p.current_price = curr_price
+            if hasattr(self.risk_engine, "update_position_extremes"):
+                self.risk_engine.update_position_extremes(p.symbol, curr_price, p.entry_price)
 
             # Area A: Multi-Stage Partial Take-Profit (Scale-Out Profit Harvesting)
             should_partial_tp, partial_qty = self.risk_engine.evaluate_partial_take_profit(
@@ -610,37 +757,19 @@ class BotRunner:
                 self.risk_engine.register_partial_tp(p.symbol)
                 p.quantity -= partial_qty
 
-                if hasattr(self.risk_engine, "pattern_memory") and self.risk_engine.pattern_memory:
-                    try:
-                        from bot.models import TradeOutcome
-                        from bot.risk.regime_specialist import REGIME_SPECIALIST
-                        norm_sym = p.symbol.replace("/", "-")
-                        regime_name = REGIME_SPECIALIST.analyze_market_regime(norm_sym).regime.value
-                        entry_ctx = self.risk_engine.get_entry_context(p.symbol) if hasattr(self.risk_engine, "get_entry_context") else {}
-                        rsi_entry = float(entry_ctx.get("rsi", 50.0))
-                        ema_ratio = float(entry_ctx.get("ema_ratio", 1.0))
-                        atr_val = float(entry_ctx.get("atr", p.entry_price * 0.02))
-                        atr_pct = (atr_val / p.entry_price * 100.0) if p.entry_price > 0 else 2.0
-
-                        outcome = TradeOutcome(
-                            trade_id=executed_partial.order_id or str(uuid.uuid4())[:8],
-                            symbol=p.symbol,
-                            asset_class=p.asset_class,
-                            side=OrderSide.BUY,
-                            entry_price=p.entry_price,
-                            exit_price=curr_price,
-                            quantity=partial_qty,
-                            pnl_dollars=partial_pnl_dollars,
-                            pnl_pct=partial_pnl_pct,
-                            outcome="WIN",
-                            rsi_entry=rsi_entry,
-                            ema_ratio=ema_ratio,
-                            volatility_atr_pct=atr_pct,
-                            market_regime=regime_name,
-                        )
-                        self.risk_engine.pattern_memory.record_trade_outcome(outcome)
-                    except Exception as pe:
-                        logger.debug("Failed to record partial TP outcome: %s", pe)
+                self._record_trade_outcome_helper(
+                    symbol=p.symbol,
+                    asset_class=p.asset_class,
+                    entry_price=p.entry_price,
+                    exit_price=curr_price,
+                    quantity=partial_qty,
+                    pnl_dollars=partial_pnl_dollars,
+                    pnl_pct=partial_pnl_pct,
+                    outcome_str="WIN",
+                    exit_reason=f"PARTIAL_TP_STAGE_{current_stage}",
+                    order_id=executed_partial.order_id,
+                    existing_positions_count=len(positions),
+                )
 
                 self.notifier.notify_order_execution(executed_partial)
                 try:
@@ -763,6 +892,20 @@ class BotRunner:
                             logger.warning("[NEON] Could not save runner harvest order to Neon: %s", e)
                         closed_orders.append(executed_harvest)
 
+                        self._record_trade_outcome_helper(
+                            symbol=p.symbol,
+                            asset_class=p.asset_class,
+                            entry_price=p.entry_price,
+                            exit_price=curr_price,
+                            quantity=harvest_qty,
+                            pnl_dollars=harvest_dollars,
+                            pnl_pct=harvest_pnl_pct,
+                            outcome_str="WIN",
+                            exit_reason="RUNNER_EXTENSION_HARVEST",
+                            order_id=executed_harvest.order_id,
+                            existing_positions_count=len(positions),
+                        )
+
                         # Register runner extended so we don't extend repeatedly
                         self.risk_engine.register_runner_extended(p.symbol)
 
@@ -836,39 +979,32 @@ class BotRunner:
                 )
                 executed = self.broker.submit_order(sell_order)
 
-                # Continuous Learning Feedback Loop: Register trade outcome into PatternMemory
-                if hasattr(self.risk_engine, "pattern_memory") and self.risk_engine.pattern_memory:
-                    try:
-                        from bot.models import TradeOutcome
-                        from bot.risk.regime_specialist import REGIME_SPECIALIST
-                        norm_sym = p.symbol.replace("/", "-")
-                        regime_name = REGIME_SPECIALIST.analyze_market_regime(norm_sym).regime.value
-                        
-                        entry_ctx = self.risk_engine.get_entry_context(p.symbol) if hasattr(self.risk_engine, "get_entry_context") else {}
-                        rsi_entry = float(entry_ctx.get("rsi", 50.0))
-                        ema_ratio = float(entry_ctx.get("ema_ratio", 1.0))
-                        atr_val = float(entry_ctx.get("atr", p.entry_price * 0.02))
-                        atr_pct = (atr_val / p.entry_price * 100.0) if p.entry_price > 0 else 2.0
+                # Determine precise exit classification
+                if is_target_tp:
+                    exit_reason = "TARGET_TAKE_PROFIT"
+                elif should_time_stop:
+                    exit_reason = "TIME_STOP"
+                elif ratcheted or (new_sl > p.entry_price):
+                    exit_reason = "TRAILING_STOP"
+                elif is_loss:
+                    exit_reason = "STOP_LOSS"
+                else:
+                    exit_reason = "PROTECTIVE_EXIT"
 
-                        outcome = TradeOutcome(
-                            trade_id=executed.order_id or str(uuid.uuid4())[:8],
-                            symbol=p.symbol,
-                            asset_class=p.asset_class,
-                            side=OrderSide.BUY,
-                            entry_price=p.entry_price,
-                            exit_price=curr_price,
-                            quantity=p.quantity,
-                            pnl_dollars=pnl_dollars,
-                            pnl_pct=pnl_pct,
-                            outcome="WIN" if not is_loss else "LOSS",
-                            rsi_entry=rsi_entry,
-                            ema_ratio=ema_ratio,
-                            volatility_atr_pct=atr_pct,
-                            market_regime=regime_name,
-                        )
-                        self.risk_engine.pattern_memory.record_trade_outcome(outcome)
-                    except Exception as pe:
-                        logger.debug("Failed to record trade outcome in pattern memory: %s", pe)
+                # Continuous Learning Feedback Loop: Register trade outcome into PatternMemory
+                self._record_trade_outcome_helper(
+                    symbol=p.symbol,
+                    asset_class=p.asset_class,
+                    entry_price=p.entry_price,
+                    exit_price=curr_price,
+                    quantity=p.quantity,
+                    pnl_dollars=pnl_dollars,
+                    pnl_pct=pnl_pct,
+                    outcome_str="WIN" if not is_loss else "LOSS",
+                    exit_reason=exit_reason,
+                    order_id=executed.order_id,
+                    existing_positions_count=len(positions),
+                )
 
                 # Unified single source of truth for cooldowns and risk state
                 is_stoploss_event = not should_time_stop and is_loss
@@ -894,19 +1030,37 @@ class BotRunner:
         return (13 * 60 + 30) <= current_minute_utc < (20 * 60)
 
     def run_portfolio_cycle(self, trade_date: str | None = None) -> list[Order]:
-        """Run analysis on all symbols in the watchlist (Equities + Crypto)."""
+        """Run analysis on all symbols in the watchlist (Equities + Crypto) via Parallel Screener and Alpha Priority."""
         date = trade_date or get_current_date()
-        
+
+        # 0. Check Degradation Circuit Breaker from PortfolioIntelligence
+        from bot.learning.portfolio_intelligence import PORTFOLIO_INTELLIGENCE
+        if PORTFOLIO_INTELLIGENCE.should_halt_trading():
+            logger.warning(
+                "[CIRCUIT_BREAKER] 🛑 Trading pausado por degradación de cartera (Sharpe < 0 tras N operaciones). "
+                "Preservando 100% liquidez defensiva."
+            )
+            return []
+
+        executed_orders: list[Order] = []
+
+        # 1. Manage and protect open positions with LEAN Trailing Stops
+        exit_orders = self.manage_open_positions()
+        executed_orders.extend(exit_orders)
+
         # Palanca A: Dynamic Hot Momentum Pool Discovery
         crypto_symbols = self.config.watchlist_crypto
+        hot_crypto_set: set[str] = set()
         if getattr(self.config.risk, "enable_dynamic_hot_scanner", True):
             try:
                 top_n = getattr(self.config.risk, "hot_scanner_top_n", 12)
-                crypto_symbols = self.hot_scanner.discover_hot_universe(
+                discovered = self.hot_scanner.discover_hot_universe(
                     broker=self.broker,
                     core_symbols=self.config.watchlist_crypto,
                     top_n=top_n,
                 )
+                crypto_symbols = discovered
+                hot_crypto_set = set(discovered[:top_n])
             except Exception as hse:
                 logger.debug("Notice en hot scanner: %s; usando lista core.", hse)
                 crypto_symbols = self.config.watchlist_crypto
@@ -914,26 +1068,77 @@ class BotRunner:
         # When equity market is closed overnight or weekends, prioritize active 24/7 liquid crypto
         equity_open = self.is_equity_market_open()
         if equity_open:
-            all_symbols = self.config.watchlist_equities + crypto_symbols
+            all_symbols = list(dict.fromkeys(self.config.watchlist_equities + crypto_symbols))
         else:
-            all_symbols = crypto_symbols
-            
-        executed_orders: list[Order] = []
+            all_symbols = list(dict.fromkeys(crypto_symbols))
 
-        # 1. Manage and protect open positions with LEAN Trailing Stops
-        exit_orders = self.manage_open_positions()
-        executed_orders.extend(exit_orders)
+        # 2. Check Capacity & Buying Power Pre-conditions (Early Short-Circuit)
+        active_positions = self.broker.get_positions()
+        max_crypto = getattr(self.config.risk, "max_concurrent_crypto_positions", 2)
+        crypto_positions_count = len([
+            p for p in active_positions if self.identify_asset_class(p.symbol) == AssetClass.CRYPTO
+        ])
+        if not equity_open and crypto_positions_count >= max_crypto:
+            logger.info(
+                "[CAPACITY_SHORT_CIRCUIT] 🛡️ Capacidad cripto completa (%d/%d posiciones activas) y mercado bursátil cerrado. Ciclo completado sin consumo de tokens.",
+                crypto_positions_count, max_crypto
+            )
+            return executed_orders
 
+        # 3. Parallel High-Speed Screening (<2s across entire universe, 0 tokens)
+        import time
+        start_t = time.perf_counter()
+        screened_results = self.quant_screener.screen_universe_parallel(all_symbols, date, max_workers=8)
+        elapsed_s = time.perf_counter() - start_t
+
+        actionable = [(sym, res) for sym, res in screened_results if res.is_actionable]
         logger.info(
-            "Starting portfolio scan for %d instruments on %s (Equity Market Open: %s)",
-            len(all_symbols), date, equity_open
+            "[PARALLEL_SCREENER] ⚡ Universo de %d activos escaneado en %.2fs. %d setups accionables detectados (Mercado Accionario Abierto: %s).",
+            len(all_symbols), elapsed_s, len(actionable), equity_open
         )
-        for sym in all_symbols:
+
+        if not actionable:
+            logger.info(
+                "[PARALLEL_SCREENER] 🛡️ Ningún activo superó el umbral cuantitativo determinista. Capital 100% en resguardo (0 tokens gastados)."
+            )
+            return executed_orders
+
+        # 4. Dynamic Scan Order Prioritization (Alpha-Ranking)
+        # Priority = screener_score * portfolio_alloc_mult * (1.15 if hot)
+        def _compute_priority(item: tuple[str, QuantScreenResult]) -> float:
+            sym, res = item
+            alloc_mult = PORTFOLIO_INTELLIGENCE.get_allocation_multiplier(sym)
+            hot_mult = 1.15 if sym in hot_crypto_set else 1.0
+            return float(res.score * alloc_mult * hot_mult)
+
+        actionable.sort(key=_compute_priority, reverse=True)
+
+        # 5. Dispatch Prioritized Candidates with Early Capacity Short-Circuit
+        for sym, screen_res in actionable:
+            is_crypto = self.identify_asset_class(sym) == AssetClass.CRYPTO
+            # Re-check capacity before triggering heavy LLM/agent propagation
+            current_pos = self.broker.get_positions()
+            if is_crypto:
+                current_crypto = len([p for p in current_pos if self.identify_asset_class(p.symbol) == AssetClass.CRYPTO])
+                if current_crypto >= max_crypto:
+                    logger.info(
+                        "[CAPACITY_LIMIT] 🛡️ Límite cripto alcanzado (%d/%d). Omitiendo análisis de %s para ahorrar tokens y tiempo.",
+                        current_crypto, max_crypto, sym
+                    )
+                    continue
+
             try:
-                order = self.run_symbol(sym, trade_date=date)
+                order = self.run_symbol(sym, trade_date=date, pre_screen_res=screen_res)
                 if order:
                     executed_orders.append(order)
             except Exception as e:
                 logger.exception("Error processing symbol %s: %s", sym, e)
 
         return executed_orders
+
+    async def run_portfolio_cycle_async(self, trade_date: str | None = None) -> list[Order]:
+        """Asynchronous execution of the portfolio cycle."""
+        import asyncio
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.run_portfolio_cycle, trade_date)
+
