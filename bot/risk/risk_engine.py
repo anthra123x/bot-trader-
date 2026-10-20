@@ -2,6 +2,7 @@ import logging
 import math
 import time
 from typing import Any
+import numpy as np
 from bot.config import BotRiskConfig
 from bot.learning.pattern_memory import PatternMemory
 from bot.models import AccountBalance, AssetClass, OrderSide, Position, RiskValidationResult, TradeSignal
@@ -44,6 +45,8 @@ class RiskEngine:
         self._in_flight_orders: dict[str, list[dict[str, Any]]] = {}
         # Position entry duration tracker for Opportunity Cost Time-Stop
         self._position_entry_times: dict[str, float] = {}
+        # Consecutive loss streak per symbol for Extended Quarantine
+        self._symbol_loss_streak: dict[str, int] = {}
 
     def register_order_in_flight(self, symbol: str, quantity: float, price: float, asset_class: AssetClass) -> None:
         """Track newly submitted order in-flight to prevent duplicate rapid pyramiding."""
@@ -181,6 +184,20 @@ class RiskEngine:
                 # Prune events older than 1 hour
                 self._recent_stoploss_events = [t for t in self._recent_stoploss_events if now - t < 3600.0]
 
+            curr_streak = self._symbol_loss_streak.get(norm_sym, 0) + 1
+            self._symbol_loss_streak[norm_sym] = curr_streak
+            self._symbol_loss_streak[symbol] = curr_streak
+            thresh_losses = getattr(self.config, "symbol_consecutive_losses_threshold", 2)
+            if curr_streak >= thresh_losses and getattr(self.config, "enable_extended_symbol_quarantine", True):
+                ext_seconds = getattr(self.config, "extended_quarantine_seconds", 14400)
+                logger.warning(
+                    "[EXTENDED_QUARANTINE] 🚨 %s acumula %d pérdidas consecutivas. Entrando en cuarentena defensiva por %.1f horas.",
+                    symbol, curr_streak, ext_seconds / 3600.0
+                )
+        else:
+            self._symbol_loss_streak.pop(norm_sym, None)
+            self._symbol_loss_streak.pop(symbol, None)
+
     def register_position_entry(self, symbol: str, entry_price: float = 0.0, timestamp: float | None = None) -> None:
         """Record entry timestamp for position duration tracking."""
         norm_sym = normalize_symbol(symbol)
@@ -259,10 +276,113 @@ class RiskEngine:
         now = time.time()
         if norm_sym in self._symbol_cooldowns:
             elapsed = now - self._symbol_cooldowns[norm_sym]
-            if elapsed < self.config.cooldown_period_seconds:
-                remaining = self.config.cooldown_period_seconds - elapsed
+            streak = self._symbol_loss_streak.get(norm_sym, 0)
+            thresh_losses = getattr(self.config, "symbol_consecutive_losses_threshold", 2)
+            if streak >= thresh_losses and getattr(self.config, "enable_extended_symbol_quarantine", True):
+                req_cd = getattr(self.config, "extended_quarantine_seconds", 14400)
+            else:
+                req_cd = self.config.cooldown_period_seconds
+
+            if elapsed < req_cd:
+                remaining = req_cd - elapsed
                 return True, remaining
         return False, 0.0
+
+    def evaluate_meta_labeling(
+        self,
+        signal: TradeSignal,
+        market_regime: str = "UNKNOWN",
+    ) -> tuple[bool, float, str]:
+        """Meta-Labeling Binary Quality Filter based on Marcos Lopez de Prado's framework.
+        
+        Calculates the estimated probability of trade success P(Success) under current
+        microstructure noise, fractal persistence, and volume flow.
+        
+        Threshold: P(Success) >= min_meta_probability (default 0.62) to approve trade execution.
+        """
+        if not getattr(self.config, "enable_meta_labeling", True):
+            return True, 1.0, ""
+
+        metrics = signal.metrics or {}
+        # If test signal without microstructure metrics, pass through
+        if not metrics or ("hurst_exponent" not in metrics and "volume_delta_flow" not in metrics and "l2_imbalance_ratio" not in metrics):
+            return True, 0.75, "Meta-labeling passthrough (no microstructure metrics provided)"
+
+        p_success = 0.50  # Prior probability
+
+        # 1. Multi-Agent / Screener Signal Conviction
+        sig_conf = float(signal.confidence) if signal.confidence else 0.50
+        p_success += (sig_conf - 0.50) * 0.25
+
+        # 2. Fractal Noise / Hurst Exponent Memory
+        if "hurst_exponent" in metrics:
+            h_val = float(metrics["hurst_exponent"])
+            if h_val >= 0.56:
+                p_success += 0.12  # Strong persistent statistical memory
+            elif h_val >= 0.52:
+                p_success += 0.05
+            elif h_val < 0.48:
+                p_success -= 0.15  # Pure Brownian noise / Random walk penalty
+
+        # 3. Cumulative Volume Delta Flow (CVD)
+        if "volume_delta_flow" in metrics:
+            cvd_flow = float(metrics["volume_delta_flow"])
+            is_cvd_divergent = bool(metrics.get("is_cvd_divergent", 0.0))
+            if is_cvd_divergent:
+                p_success -= 0.18  # Trap exhaustion divergence
+            elif cvd_flow > 0.20:
+                p_success += 0.10  # Institutional volume accumulation
+
+        # 4. Level 2 Order Book Depth Imbalance
+        if "l2_imbalance_ratio" in metrics:
+            l2_ratio = float(metrics["l2_imbalance_ratio"])
+            if l2_ratio >= 1.25:
+                p_success += 0.08  # Bullish buyer absorption
+            elif l2_ratio <= 0.60:
+                p_success -= 0.15  # Seller overhang resistance
+
+        # 5. Market Regime
+        reg_upper = market_regime.upper()
+        if "BEAR" in reg_upper or "DEFENSIVE" in reg_upper:
+            p_success -= 0.20
+        elif "TRENDING_BULL" in reg_upper:
+            p_success += 0.08
+
+        # 6. Pattern Memory Loss Similarity
+        if hasattr(self, "pattern_memory") and self.pattern_memory:
+            try:
+                rsi_val = float(metrics.get("rsi", 50.0))
+                ema_ratio = float(metrics.get("ema_ratio", 1.0))
+                atr_pct = float(metrics.get("atr_pct", 2.0))
+                pcheck = self.pattern_memory.evaluate_setup(
+                    symbol=signal.symbol,
+                    asset_class=signal.asset_class,
+                    rsi=rsi_val,
+                    ema_ratio=ema_ratio,
+                    atr_pct=atr_pct,
+                )
+                if not pcheck.is_approved:
+                    p_success -= 0.25
+                elif pcheck.suggested_multiplier < 1.0:
+                    p_success -= 0.10
+            except Exception:
+                pass
+
+        p_success = float(np.clip(p_success, 0.05, 0.95))
+        min_prob = getattr(self.config, "min_meta_probability", 0.62)
+
+        if p_success < min_prob:
+            h_str = f"H={metrics.get('hurst_exponent')}" if 'hurst_exponent' in metrics else ""
+            l2_str = f"L2={metrics.get('l2_imbalance_ratio')}x" if 'l2_imbalance_ratio' in metrics else ""
+            noise_ctx = f" ({', '.join(filter(None, [h_str, l2_str]))})" if (h_str or l2_str) else ""
+            reason = (
+                f"Filtro Meta-Labeling (López de Prado): Probabilidad de éxito estimada "
+                f"P(Success)={p_success:.1%} inferior al umbral mínimo ({min_prob:.1%})"
+                f"{noise_ctx}. Falso positivo neutralizado para proteger capital."
+            )
+            return False, p_success, reason
+
+        return True, p_success, f"Meta-Labeling Aprobado (P(Success)={p_success:.1%})"
 
 
     def evaluate_partial_take_profit(
@@ -500,17 +620,16 @@ class RiskEngine:
             )
             return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
 
-        # Freqtrade Protection: CooldownPeriod per asset
+        # Freqtrade Protection: CooldownPeriod per asset / Extended Quarantine
         norm_sym = normalize_symbol(signal.symbol)
-        if signal.action == OrderSide.BUY and norm_sym in self._symbol_cooldowns:
-            elapsed = now - self._symbol_cooldowns[norm_sym]
-            if elapsed < self.config.cooldown_period_seconds:
-                remaining_min = (self.config.cooldown_period_seconds - elapsed) / 60.0
-                rejection_reasons.append(
-                    f"Freqtrade CooldownPeriod activo para {signal.symbol}: "
-                    f"esperando {remaining_min:.1f}m antes de re-entrada tras pérdida previa."
-                )
-                return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+        in_cd, remaining_sec = self.is_in_cooldown(signal.symbol)
+        if signal.action == OrderSide.BUY and in_cd:
+            remaining_min = remaining_sec / 60.0
+            rejection_reasons.append(
+                f"Freqtrade CooldownPeriod activo para {signal.symbol}: "
+                f"esperando {remaining_min:.1f}m antes de re-entrada tras pérdidas previas."
+            )
+            return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
 
         # 1. Action check
         if signal.action == OrderSide.HOLD:
@@ -649,6 +768,18 @@ class RiskEngine:
                     f"Portafolio protegido contra sobre-concentración y volatilidad sistémica."
                 )
                 return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+
+        # 8b. Meta-Labeling Binary Quality Filter (Marcos López de Prado)
+        if signal.action == OrderSide.BUY and getattr(self.config, "enable_meta_labeling", True):
+            is_meta_ok, p_success, meta_reason = self.evaluate_meta_labeling(
+                signal=signal,
+                market_regime=str(signal.metrics.get("regime") or "UNKNOWN"),
+            )
+            if not is_meta_ok:
+                rejection_reasons.append(meta_reason)
+                return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+            else:
+                warnings.append(f"[META_LABELING] 🎯 Filtro de Precisión superado: {meta_reason}")
 
         # 9. Pattern Learning & Mistake Veto (ML4T Continuous Feedback)
         pattern_multiplier = 1.0

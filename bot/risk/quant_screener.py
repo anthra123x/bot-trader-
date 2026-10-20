@@ -36,6 +36,87 @@ class QuantScreenResult:
     rationale: str
 
 
+def calculate_hurst_exponent(prices: list[float] | np.ndarray, max_lag: int = 20) -> float:
+    """Calculate the Generalized Hurst Exponent (H) of a price series using variance-lag scaling.
+    
+    H < 0.45: Anti-persistent / Mean-reverting / Choppy range-bound
+    0.45 <= H <= 0.52: Random Walk / Brownian noise (pure market randomness)
+    H > 0.52: Persistent / Trending (genuine directional memory)
+    """
+    try:
+        ts = np.asarray(prices, dtype=float)
+        ts = ts[ts > 0]
+        n = len(ts)
+        if n < 30:
+            return 0.50
+        log_prices = np.log(ts)
+        max_lag = min(max_lag, n // 3)
+        if max_lag < 5:
+            return 0.50
+        lags = range(2, max_lag)
+        tau = [np.std(log_prices[lag:] - log_prices[:-lag]) for lag in lags]
+        valid = [(l, t) for l, t in zip(lags, tau) if t > 1e-9]
+        if len(valid) < 3:
+            return 0.50
+        valid_lags, valid_tau = zip(*valid)
+        poly = np.polyfit(np.log(valid_lags), np.log(valid_tau), 1)
+        return float(np.clip(poly[0], 0.05, 0.95))
+    except Exception:
+        return 0.50
+
+
+def calculate_volume_delta_flow(
+    closes: list[float] | np.ndarray,
+    volumes: list[float] | np.ndarray,
+    highs: list[float] | None = None,
+    lows: list[float] | None = None,
+    lookback: int = 14,
+) -> tuple[float, bool]:
+    """Calculate normalized Volume Delta Flow (CVD proxy) and detect trap divergences.
+    
+    Returns:
+        (flow_score, is_divergent):
+        - flow_score: float in [-1.0, 1.0] representing directional volume pressure.
+        - is_divergent: True if price is making higher highs over lookback but CVD is negative.
+    """
+    try:
+        c = np.asarray(closes, dtype=float)
+        v = np.asarray(volumes, dtype=float)
+        n = len(c)
+        if n < lookback or len(v) < lookback:
+            return 0.0, False
+
+        h = np.asarray(highs, dtype=float) if highs is not None and len(highs) == n else None
+        l = np.asarray(lows, dtype=float) if lows is not None and len(lows) == n else None
+
+        c_win = c[-lookback:]
+        v_win = v[-lookback:]
+
+        if h is not None and l is not None:
+            h_win = h[-lookback:]
+            l_win = l[-lookback:]
+            hl_range = h_win - l_win
+            deltas = np.where(hl_range > 1e-8, (2.0 * c_win - h_win - l_win) / hl_range * v_win, 0.0)
+        else:
+            ret = np.diff(c[-(lookback + 1):])
+            deltas = np.sign(ret) * v_win
+
+        total_vol = np.sum(v_win)
+        if total_vol <= 0:
+            return 0.0, False
+
+        cum_delta = np.sum(deltas)
+        flow_score = float(np.clip(cum_delta / total_vol, -1.0, 1.0))
+
+        recent_price_peak = np.max(c_win)
+        is_at_high = c_win[-1] >= recent_price_peak * 0.99
+        is_divergent = is_at_high and flow_score < -0.15
+
+        return flow_score, is_divergent
+    except Exception:
+        return 0.0, False
+
+
 class QuantScreener:
     """High-speed algorithmic screener evaluating Trend, Momentum, Volatility, and Mean Reversion."""
 
@@ -49,6 +130,12 @@ class QuantScreener:
         enable_mtf_confluence: bool = True,
         mtf_bonus_score: float = 20.0,
         mtf_penalty_score: float = 25.0,
+        enable_hurst_filter: bool = True,
+        min_hurst_trending: float = 0.52,
+        hurst_bonus_score: float = 15.0,
+        hurst_penalty_score: float = 20.0,
+        enable_cvd_flow_filter: bool = True,
+        cvd_penalty_score: float = 20.0,
     ):
         self.rsi_oversold = rsi_oversold
         self.rsi_overbought = rsi_overbought
@@ -58,6 +145,12 @@ class QuantScreener:
         self.enable_mtf_confluence = enable_mtf_confluence
         self.mtf_bonus_score = mtf_bonus_score
         self.mtf_penalty_score = mtf_penalty_score
+        self.enable_hurst_filter = enable_hurst_filter
+        self.min_hurst_trending = min_hurst_trending
+        self.hurst_bonus_score = hurst_bonus_score
+        self.hurst_penalty_score = hurst_penalty_score
+        self.enable_cvd_flow_filter = enable_cvd_flow_filter
+        self.cvd_penalty_score = cvd_penalty_score
         self._btc_macro_cache: tuple[float, dict[str, Any]] | None = None
 
     def get_btc_macro_health(self, as_of_date: str) -> dict[str, Any]:
@@ -176,6 +269,22 @@ class QuantScreener:
             band_pct = (close - boll_lb) / channel_width if channel_width > 0 else 0.5
             atr_pct = round((atr / close) * 100.0, 2) if close > 0 else 0.0
 
+            # Hurst Exponent (Fractal Randomness vs Persistent Signal)
+            h_val = calculate_hurst_exponent(stock_df["close"].tolist())
+
+            # Volume Delta Flow (CVD / Institutional Volume Absorption)
+            cvd_flow = 0.0
+            is_cvd_divergent = False
+            if "volume" in stock_df and len(stock_df["volume"]) >= 14:
+                highs_list = stock_df["high"].tolist() if "high" in stock_df else None
+                lows_list = stock_df["low"].tolist() if "low" in stock_df else None
+                cvd_flow, is_cvd_divergent = calculate_volume_delta_flow(
+                    stock_df["close"].tolist(),
+                    stock_df["volume"].tolist(),
+                    highs_list,
+                    lows_list,
+                )
+
             metrics = {
                 "close": close,
                 "rsi": rsi,
@@ -192,6 +301,9 @@ class QuantScreener:
                 "rvol": rvol,
                 "divergence": div_type or "NONE",
                 "mtf_confluence": "NEUTRAL",
+                "hurst_exponent": round(h_val, 3),
+                "volume_delta_flow": round(cvd_flow, 3),
+                "is_cvd_divergent": 1.0 if is_cvd_divergent else 0.0,
             }
 
             bull_points = 0
@@ -311,6 +423,35 @@ class QuantScreener:
                 elif bear_points > bull_points:
                     bear_points = max(0, bear_points - 10)
                     bear_reasons.append(f"Aviso: Volumen reducido (RVOL: {rvol:.2f}x)")
+
+            # 6b. Fractal Noise Filter (Hurst Exponent)
+            if getattr(self, "enable_hurst_filter", True):
+                if h_val >= 0.56:
+                    bonus = int(getattr(self, "hurst_bonus_score", 15.0))
+                    if bull_points > bear_points:
+                        bull_points += bonus
+                        bull_reasons.append(f"Persistencia Fractal Confirmada: Hurst H={h_val:.2f} >= 0.56 (+{bonus} pts)")
+                    elif bear_points > bull_points:
+                        bear_points += bonus
+                        bear_reasons.append(f"Persistencia Fractal Bajista: Hurst H={h_val:.2f} >= 0.56 (+{bonus} pts)")
+                elif h_val < getattr(self, "min_hurst_trending", 0.52):
+                    penalty = int(getattr(self, "hurst_penalty_score", 20.0))
+                    if bull_points > bear_points:
+                        bull_points = max(0, bull_points - penalty)
+                        bull_reasons.append(f"Aviso Ruido Fractal: Mercado en Random Walk/Ruido Estocástico (H={h_val:.2f} < {getattr(self, 'min_hurst_trending', 0.52):.2f}, -{penalty} pts)")
+                    elif bear_points > bull_points:
+                        bear_points = max(0, bear_points - penalty)
+                        bear_reasons.append(f"Aviso Ruido Fractal: Mercado en Random Walk/Ruido Estocástico (H={h_val:.2f} < {getattr(self, 'min_hurst_trending', 0.52):.2f}, -{penalty} pts)")
+
+            # 6c. Cumulative Volume Delta Flow (CVD)
+            if getattr(self, "enable_cvd_flow_filter", True):
+                if is_cvd_divergent and bull_points > bear_points:
+                    cvd_pen = int(getattr(self, "cvd_penalty_score", 20.0))
+                    bull_points = max(0, bull_points - cvd_pen)
+                    bull_reasons.append(f"Aviso Trampa de Volumen: Precio en máximos con Delta de Volumen negativo (CVD={cvd_flow:+.2f}, -{cvd_pen} pts)")
+                elif cvd_flow > 0.20 and bull_points > bear_points:
+                    bull_points += 10
+                    bull_reasons.append(f"Flujo Institucional Confirmado: Delta de Volumen Acumulado positivo (CVD: {cvd_flow:+.2f}, +10 pts)")
 
             # Determine setup and actionable conviction
             is_actionable = False

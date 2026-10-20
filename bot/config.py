@@ -116,6 +116,26 @@ class BotRiskConfig(BaseModel):
     max_crypto_stagnant_hours: float = Field(default=4.0, description="Max holding hours for crypto position in narrow stagnation range (4.0 hours)")
     stagnant_range_pct: float = Field(default=1.2, description="Max absolute profit/loss % boundary to consider a position stagnant (+/- 1.2%)")
 
+    # --- 4 PILARES DE PRECISIÓN CONTRA LA ALEATORIEDAD DEL MERCADO ---
+    # 1. Filtro de Ruido Fractal (Hurst Exponent H)
+    enable_hurst_filter: bool = Field(default=True, description="Enable Hurst exponent fractal noise filter to reject random walk assets")
+    min_hurst_trending: float = Field(default=0.52, description="Minimum Hurst exponent to qualify as persistent trending signal (0.52)")
+    hurst_bonus_score: float = Field(default=15.0, description="Conviction bonus points for high-persistence assets H >= 0.56 (+15)")
+    hurst_penalty_score: float = Field(default=20.0, description="Conviction penalty points for random walk assets H < 0.50 (-20)")
+
+    # 2. Cumulative Volume Delta (CVD) / Volume-Weighted Flow
+    enable_cvd_flow_filter: bool = Field(default=True, description="Enable Volume Delta Flow analysis to filter bull/bear trap exhaustion divergences")
+    cvd_penalty_score: float = Field(default=20.0, description="Conviction penalty when price rises on negative volume delta flow (-20)")
+
+    # 3. Meta-Labeling Binary Quality Filter (Marcos López de Prado)
+    enable_meta_labeling: bool = Field(default=True, description="Enable Lopez de Prado Meta-Labeling quality gate (evaluates P(Success) under noise)")
+    min_meta_probability: float = Field(default=0.62, description="Minimum meta-probability P(Success) required to execute trade (0.62 = 62%)")
+
+    # 4. Extended Asset Quarantine Cooldown (Pattern Protection)
+    enable_extended_symbol_quarantine: bool = Field(default=True, description="Quarantine specific symbol after consecutive losses")
+    symbol_consecutive_losses_threshold: int = Field(default=2, description="Consecutive losses on single symbol before triggering extended quarantine (2)")
+    extended_quarantine_seconds: int = Field(default=14400, description="Duration in seconds of extended quarantine cooldown (4 hours = 14400s)")
+
 
 class BotConfig(BaseModel):
     """Global Bot Configuration."""

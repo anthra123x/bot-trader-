@@ -221,6 +221,7 @@ class TestPalancaDOrderBookImbalance:
             enable_order_book_imbalance=True,
             max_seller_overhang_ratio=0.60,
             max_position_size_pct=20.0,
+            enable_meta_labeling=False,
         )
         engine = RiskEngine(config)
         balance = AccountBalance(cash=10000.0, equity=10000.0, buying_power=10000.0)
@@ -374,4 +375,119 @@ class TestIntelligentTimeStopRotation:
 
         # But recent stoploss events list is EMPTY so circuit breaker is not triggered!
         assert len(engine._recent_stoploss_events) == 0
+
+
+class TestPrecisionAgainstRandomness:
+    """Tests for the 4 Precision Pillars Against Market Randomness."""
+
+    def test_hurst_exponent_fractal_noise_detection(self):
+        import numpy as np
+        from bot.risk.quant_screener import calculate_hurst_exponent
+
+        # 1. Random Walk / Brownian noise (H approx 0.50)
+        np.random.seed(42)
+        rw = np.cumsum(np.random.randn(200)) + 100
+        h_rw = calculate_hurst_exponent(rw)
+        assert 0.40 <= h_rw <= 0.55
+
+        # 2. Trending persistent series (H > 0.52)
+        trend = np.linspace(100, 300, 200) + np.random.randn(200) * 0.5
+        h_trend = calculate_hurst_exponent(trend)
+        assert h_trend >= 0.52
+
+    def test_volume_delta_flow_trap_divergence_detection(self):
+        from bot.risk.quant_screener import calculate_volume_delta_flow
+
+        # Case 1: Healthy volume expansion in uptrend
+        closes = [100.0 + i for i in range(20)]
+        volumes = [1000.0] * 20
+        highs = [c + 0.5 for c in closes]
+        lows = [c - 0.5 for c in closes]
+        flow, is_trap = calculate_volume_delta_flow(closes, volumes, highs, lows)
+        assert is_trap is False
+
+        # Case 2: Bull trap exhaustion (price reaches new high, but closes at bottom of bars)
+        trap_closes = [100.0 + i for i in range(20)]
+        trap_highs = [c + 3.0 for c in trap_closes]
+        trap_lows = [c - 0.1 for c in trap_closes]  # Closed right at the bottom
+        trap_flow, is_trap = calculate_volume_delta_flow(trap_closes, volumes, trap_highs, trap_lows)
+        assert is_trap is True
+        assert trap_flow < -0.15
+
+    def test_meta_labeling_quality_gate(self):
+        config = BotRiskConfig(
+            enable_meta_labeling=True,
+            min_meta_probability=0.62,
+        )
+        engine = RiskEngine(config=config)
+
+        # High-conviction setup (Persistent trend H=0.58, L2=1.30, Bullish CVD)
+        good_signal = TradeSignal(
+            symbol="BTC-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="BUY",
+            action=OrderSide.BUY,
+            confidence=0.85,
+            current_price=100.0,
+            metrics={
+                "hurst_exponent": 0.58,
+                "volume_delta_flow": 0.35,
+                "l2_imbalance_ratio": 1.30,
+            },
+        )
+        is_ok, p_success, reason = engine.evaluate_meta_labeling(good_signal, market_regime="TRENDING_BULL_STABLE")
+        assert is_ok is True
+        assert p_success >= 0.62
+
+        # Low-probability setup trapped in random walk noise (H=0.46, seller overhang L2=0.55, negative CVD)
+        noisy_signal = TradeSignal(
+            symbol="DOGE-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-18",
+            rating="BUY",
+            action=OrderSide.BUY,
+            confidence=0.55,
+            current_price=0.08,
+            metrics={
+                "hurst_exponent": 0.46,
+                "volume_delta_flow": -0.25,
+                "is_cvd_divergent": 1.0,
+                "l2_imbalance_ratio": 0.55,
+            },
+        )
+        is_ok, p_success, reason = engine.evaluate_meta_labeling(noisy_signal, market_regime="CHOPPY_RANGE_BOUND")
+        assert is_ok is False
+        assert p_success < 0.62
+        assert "Meta-Labeling" in reason
+
+    def test_extended_quarantine_on_consecutive_losses(self):
+        config = BotRiskConfig(
+            cooldown_period_seconds=1800,  # 30m standard
+            enable_extended_symbol_quarantine=True,
+            symbol_consecutive_losses_threshold=2,
+            extended_quarantine_seconds=14400,  # 4h extended
+        )
+        engine = RiskEngine(config=config)
+
+        # Trade 1: Loss 1 on SOL-USD
+        engine.register_trade_exit("SOL-USD", is_loss=True)
+        in_cd, remaining = engine.is_in_cooldown("SOL-USD")
+        assert in_cd is True
+        assert remaining <= 1800.0  # Standard 30m cooldown
+
+        # Trade 2: Loss 2 on SOL-USD -> triggers 4-hour extended quarantine
+        engine.register_trade_exit("SOL-USD", is_loss=True)
+        in_cd, remaining = engine.is_in_cooldown("SOL-USD")
+        assert in_cd is True
+        assert remaining > 1800.0  # Extended beyond 30m!
+        assert remaining <= 14400.0
+
+        # Trade 3: Other assets (BTC-USD) are NOT in quarantine
+        in_cd_btc, _ = engine.is_in_cooldown("BTC-USD")
+        assert in_cd_btc is False
+
+        # Reset streak on winning trade
+        engine.register_trade_exit("SOL-USD", is_loss=False)
+        assert "SOLUSD" not in engine._symbol_loss_streak
 

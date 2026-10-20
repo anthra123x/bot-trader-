@@ -54,11 +54,23 @@ class BotRunner:
         enable_mtf = getattr(self.config.risk, "enable_mtf_confluence", True)
         mtf_bonus = getattr(self.config.risk, "mtf_bonus_score", 20.0)
         mtf_penalty = getattr(self.config.risk, "mtf_penalty_score", 25.0)
+        enable_hurst = getattr(self.config.risk, "enable_hurst_filter", True)
+        min_hurst = getattr(self.config.risk, "min_hurst_trending", 0.52)
+        hurst_bonus = getattr(self.config.risk, "hurst_bonus_score", 15.0)
+        hurst_penalty = getattr(self.config.risk, "hurst_penalty_score", 20.0)
+        enable_cvd = getattr(self.config.risk, "enable_cvd_flow_filter", True)
+        cvd_penalty = getattr(self.config.risk, "cvd_penalty_score", 20.0)
         self.quant_screener = QuantScreener(
             conviction_threshold=thresh,
             enable_mtf_confluence=enable_mtf,
             mtf_bonus_score=mtf_bonus,
             mtf_penalty_score=mtf_penalty,
+            enable_hurst_filter=enable_hurst,
+            min_hurst_trending=min_hurst,
+            hurst_bonus_score=hurst_bonus,
+            hurst_penalty_score=hurst_penalty,
+            enable_cvd_flow_filter=enable_cvd,
+            cvd_penalty_score=cvd_penalty,
         )
         self.hot_scanner = HOT_MOMENTUM_SCANNER
         self.order_book_analyzer = ORDER_BOOK_ANALYZER
