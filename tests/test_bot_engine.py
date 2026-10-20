@@ -1115,6 +1115,43 @@ class TestLeanAndFreqtradeProtections:
         screener = QuantScreener(conviction_threshold=config.screener_conviction_threshold)
         assert screener.conviction_threshold == 55.0
 
+    def test_profit_quarantine_milestone_ratchet(self):
+        """Ensure vault only harvests at configured milestone steps ($200) and NEVER fluctuates down."""
+        config = BotRiskConfig(
+            min_cash_reserve_pct=20.0,
+            enable_profit_quarantine_vault=True,
+            profit_quarantine_ratio=0.40,
+            profit_quarantine_milestone_step=200.0,
+        )
+        engine = RiskEngine(config, pattern_memory=PatternMemory(db_path=":memory:"))
+
+        # Initial capital: $100,000.
+        # 1. Net profit $120 (< $200 step) -> 0 milestones completed -> $0 quarantined.
+        bal_stage1 = AccountBalance(cash=50_000.0, equity=100_120.0, buying_power=50_000.0, initial_day_equity=100_000.0)
+        _, _, quar1 = engine.calculate_protected_cash_reserve(bal_stage1)
+        assert quar1 == 0.0
+
+        # 2. Net profit advances to $250 -> 1 milestone completed ($200) -> 40% of $200 = $80 quarantined.
+        bal_stage2 = AccountBalance(cash=50_000.0, equity=100_250.0, buying_power=50_000.0, initial_day_equity=100_000.0)
+        _, _, quar2 = engine.calculate_protected_cash_reserve(bal_stage2)
+        assert quar2 == 80.0
+
+        # 3. Market dips temporarily, net profit drops to $140 -> Vault must NOT fluctuate down! Stays at $80.0.
+        bal_stage3 = AccountBalance(cash=50_000.0, equity=100_140.0, buying_power=50_000.0, initial_day_equity=100_000.0)
+        _, _, quar3 = engine.calculate_protected_cash_reserve(bal_stage3)
+        assert quar3 == 80.0
+
+        # 4. Net profit expands to $480 -> 2 milestones completed ($400) -> 40% of $400 = $160 quarantined.
+        bal_stage4 = AccountBalance(cash=50_000.0, equity=100_480.0, buying_power=50_000.0, initial_day_equity=100_000.0)
+        _, _, quar4 = engine.calculate_protected_cash_reserve(bal_stage4)
+        assert quar4 == 160.0
+
+        # 5. Market dips to $310 profit -> Vault remains locked at $160.0!
+        bal_stage5 = AccountBalance(cash=50_000.0, equity=100_310.0, buying_power=50_000.0, initial_day_equity=100_000.0)
+        _, _, quar5 = engine.calculate_protected_cash_reserve(bal_stage5)
+        assert quar5 == 160.0
+
+
 
 
 

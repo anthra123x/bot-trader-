@@ -325,11 +325,7 @@ async def get_balance() -> dict[str, Any]:
             }
         else:
             bal = broker_instance.get_account_balance()
-            min_cash_pct = getattr(BOT_CONFIG.risk, "min_cash_reserve_pct", 20.0)
-            base_cash_reserve = bal.equity * (min_cash_pct / 100.0)
-            net_profit = max(0.0, bal.equity - bal.initial_day_equity) if bal.initial_day_equity > 0 else 0.0
-            quarantined_profit = round(net_profit * getattr(BOT_CONFIG.risk, "profit_quarantine_ratio", 0.40), 2) if getattr(BOT_CONFIG.risk, "enable_profit_quarantine_vault", True) else 0.0
-            total_protected = round(base_cash_reserve + quarantined_profit, 2)
+            total_protected, base_cash_reserve, quarantined_profit = bot_runner.risk_engine.calculate_protected_cash_reserve(bal)
             unencumbered = round(max(0.0, bal.cash - total_protected), 2)
             return {
                 "cash": bal.cash,

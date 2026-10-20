@@ -37,6 +37,8 @@ class RiskEngine:
         self.entry_contexts: dict[str, dict[str, Any]] = {}
         # Portfolio-level Peak Equity High-Water Mark tracker
         self._peak_equity: float = 0.0
+        # Permanent Profit Quarantine Vault Ratchet (never fluctuates down)
+        self._peak_quarantined_profit: float = 0.0
         # In-flight orders tracker: symbol -> list of dicts (timestamp, qty, cost, asset_class)
         self._in_flight_orders: dict[str, list[dict[str, Any]]] = {}
 
@@ -249,7 +251,8 @@ class RiskEngine:
     def calculate_protected_cash_reserve(self, balance: AccountBalance) -> tuple[float, float, float]:
         """Calculate dynamic protected cash reserve: (total_protected_cash, base_cash_reserve, quarantined_profit).
         
-        Guarantees that 40% of cumulative net profit is permanently locked into an untouchable cash vault (leaving 60% working).
+        Guarantees that 40% of each completed profit milestone chunk (e.g. cada $200 USD) is permanently locked
+        into an untouchable cash vault ratchet that NEVER fluctuates down, leaving the rest actively working.
         """
         min_cash_pct = getattr(self.config, "min_cash_reserve_pct", 20.0)
         base_cash_reserve = balance.equity * (min_cash_pct / 100.0)
@@ -257,7 +260,17 @@ class RiskEngine:
         if getattr(self.config, "enable_profit_quarantine_vault", True) and balance.initial_day_equity > 0:
             net_profit = max(0.0, balance.equity - balance.initial_day_equity)
             quarantine_ratio = getattr(self.config, "profit_quarantine_ratio", 0.40)
-            quarantined_profit = round(net_profit * quarantine_ratio, 4)
+            milestone_step = getattr(self.config, "profit_quarantine_milestone_step", 200.0)
+            if milestone_step > 0:
+                completed_milestones = int(net_profit // milestone_step)
+                target_quarantine = completed_milestones * (milestone_step * quarantine_ratio)
+            else:
+                target_quarantine = net_profit * quarantine_ratio
+
+            # Permanent Ratchet Floor: The locked vault profit can ONLY scale up, NEVER fluctuate down!
+            self._peak_quarantined_profit = max(self._peak_quarantined_profit, round(target_quarantine, 4))
+            quarantined_profit = self._peak_quarantined_profit
+
         total_protected = base_cash_reserve + quarantined_profit
         return total_protected, base_cash_reserve, quarantined_profit
 

@@ -82,6 +82,7 @@ class BotRiskConfig(BaseModel):
     # Profit Quarantine Vault (Untouchable Retained Profit Lockbox - 40%)
     enable_profit_quarantine_vault: bool = Field(default=True, description="Enable institutional profit quarantine lockbox vault")
     profit_quarantine_ratio: float = Field(default=0.40, description="Ratio of cumulative net profit quarantined into untouchable cash vault (40%)")
+    profit_quarantine_milestone_step: float = Field(default=200.0, description="Milestone profit step in USD to harvest and lock into untouchable vault (e.g. $200)")
     # Portfolio Aggregate Crypto Exposure Limit (Systemic Risk Control)
     max_total_crypto_allocation_pct: float = Field(default=30.0, description="Max total portfolio allocation across all crypto assets combined (30%)")
     # Portfolio-Level High-Water Mark Trailing Drawdown Protection (Peak Profit Lock)
