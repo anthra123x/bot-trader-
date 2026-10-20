@@ -45,7 +45,7 @@ class QuantScreener:
         rsi_overbought: float = 62.0,
         atr_multiplier_sl: float = 1.2,
         atr_multiplier_tp: float = 2.4,
-        conviction_threshold: float = 45.0,
+        conviction_threshold: float = 55.0,
     ):
         self.rsi_oversold = rsi_oversold
         self.rsi_overbought = rsi_overbought

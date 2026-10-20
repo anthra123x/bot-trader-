@@ -299,6 +299,8 @@ class RiskEngine:
         from bot.risk.regime_specialist import MarketRegime
         if getattr(regime_analysis, "regime", None) == MarketRegime.HIGH_VOLATILITY_EXPANSION:
             dynamic_distance = round(self.config.trailing_stop_distance_pct * 1.25, 2)
+        elif getattr(regime_analysis, "regime", None) == MarketRegime.DEFENSIVE_BEAR_BREAKDOWN:
+            dynamic_distance = round(self.config.trailing_stop_distance_pct * 0.75, 2)
 
         candidate_sl = current_stop_loss
         was_updated = False

@@ -64,7 +64,8 @@ class AgentBrain:
         self.broker = broker or get_broker(self.config.broker_type)
         self.risk_engine = risk_engine or RiskEngine(self.config.risk)
         self.db = db or get_neon_repo()
-        self.quant_screener = quant_screener or QuantScreener()
+        thresh = getattr(self.config.risk, "screener_conviction_threshold", 55.0)
+        self.quant_screener = quant_screener or QuantScreener(conviction_threshold=thresh)
         self.institutional_guard = institutional_guard or InstitutionalExecutionGuard(
             cooldown_seconds=self.config.risk.cooldown_period_seconds,
         )

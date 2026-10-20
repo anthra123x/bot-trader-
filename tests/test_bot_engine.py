@@ -1106,6 +1106,15 @@ class TestLeanAndFreqtradeProtections:
         assert any("40% de ganancia neta" in w for w in res.risk_warnings)
         assert res.allocated_capital <= 24_000.0
 
+    def test_screener_conviction_threshold_55_filter(self):
+        """Ensure QuantScreener ignores weak marginal signals (<55 score) to protect agent quota."""
+        from bot.risk.quant_screener import QuantScreener
+        config = BotRiskConfig()
+        assert config.screener_conviction_threshold == 55.0
+
+        screener = QuantScreener(conviction_threshold=config.screener_conviction_threshold)
+        assert screener.conviction_threshold == 55.0
+
 
 
 

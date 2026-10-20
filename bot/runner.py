@@ -47,7 +47,8 @@ class BotRunner:
         self.broker = broker or get_broker(self.config.broker_type)
         self.db = db or get_neon_repo()
         self.risk_engine = RiskEngine(self.config.risk)
-        self.quant_screener = QuantScreener()
+        thresh = getattr(self.config.risk, "screener_conviction_threshold", 55.0)
+        self.quant_screener = QuantScreener(conviction_threshold=thresh)
         self.brain = AgentBrain(
             config=self.config,
             broker=self.broker,

@@ -23,6 +23,7 @@ class BotRiskConfig(BaseModel):
     max_overbought_rsi_buy: float = Field(default=64.0, description="Max RSI allowable for BUY entry (anti-bull-trap ceiling)")
     enable_macro_sma200_filter: bool = Field(default=True, description="Enforce macro 200 SMA trend filter for long positions")
     enable_defensive_regime_veto: bool = Field(default=True, description="Strictly veto aggressive BUYs during DEFENSIVE_BEAR_BREAKDOWN")
+    screener_conviction_threshold: float = Field(default=55.0, description="Minimum algorithmic screener score to awaken LLM committee (55.0)")
     # QuantConnect LEAN & Freqtrade Precision Enhancements
     enable_trailing_stop: bool = Field(default=True, description="Enable high-water mark trailing stop (QuantConnect LEAN)")
     trailing_stop_activation_pct: float = Field(default=1.2, description="Min profit % before trailing stop activates")
