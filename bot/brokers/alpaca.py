@@ -7,6 +7,7 @@ Supports two authentication modes:
 
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import logging
 import os
@@ -384,19 +385,24 @@ class AlpacaBroker(BaseBroker):
                         else:
                             order_status = OrderStatus.PENDING
 
-                        orders.append(
-                            Order(
-                                order_id=o.get("id", ""),
-                                symbol=sym,
-                                asset_class=AssetClass.CRYPTO if "/" in sym or "USD" in sym else AssetClass.EQUITY,
-                                side=side,
-                                order_type=OrderType.MARKET if o.get("type") == "market" else OrderType.LIMIT,
-                                quantity=float(o.get("qty", 0.0) or 0.0),
-                                limit_price=float(o.get("limit_price", 0.0) or 0.0) if o.get("limit_price") else None,
-                                filled_price=filled_p,
-                                status=order_status,
-                            )
-                        )
+                        order_kwargs: dict[str, Any] = {
+                            "order_id": o.get("id", ""),
+                            "symbol": sym,
+                            "asset_class": AssetClass.CRYPTO if "/" in sym or "USD" in sym else AssetClass.EQUITY,
+                            "side": side,
+                            "order_type": OrderType.MARKET if o.get("type") == "market" else OrderType.LIMIT,
+                            "quantity": float(o.get("qty", 0.0) or 0.0),
+                            "limit_price": float(o.get("limit_price", 0.0) or 0.0) if o.get("limit_price") else None,
+                            "filled_price": filled_p,
+                            "status": order_status,
+                        }
+                        if c_at:
+                            try:
+                                order_kwargs["created_at"] = datetime.fromisoformat(c_at.replace("Z", "+00:00"))
+                            except Exception:
+                                pass
+
+                        orders.append(Order(**order_kwargs))
                     return orders
             except Exception as e:
                 logger.debug("Failed to fetch orders from Alpaca REST: %s", e)

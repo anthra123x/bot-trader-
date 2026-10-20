@@ -111,6 +111,11 @@ class BotRiskConfig(BaseModel):
     min_order_book_imbalance_ratio: float = Field(default=1.25, description="Minimum bid/ask depth ratio for bullish institutional absorption confirmation (1.25x)")
     max_seller_overhang_ratio: float = Field(default=0.60, description="Maximum bid/ask ratio before triggering seller overhang size reduction (0.60x)")
 
+    # Intelligent Time-Stop & Capital Rotation (Opportunity Cost Time-Decay)
+    enable_time_stop_rotation: bool = Field(default=True, description="Enable time-based exit for stagnant crypto positions to rotate capital into hot momentum runners")
+    max_crypto_stagnant_hours: float = Field(default=4.0, description="Max holding hours for crypto position in narrow stagnation range (4.0 hours)")
+    stagnant_range_pct: float = Field(default=1.2, description="Max absolute profit/loss % boundary to consider a position stagnant (+/- 1.2%)")
+
 
 class BotConfig(BaseModel):
     """Global Bot Configuration."""

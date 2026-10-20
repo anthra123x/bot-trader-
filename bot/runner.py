@@ -32,6 +32,7 @@ from bot.risk.order_book_analyzer import ORDER_BOOK_ANALYZER, OrderBookAnalyzer
 from bot.risk.quant_screener import QuantScreener, QuantScreenResult
 from bot.risk.risk_engine import RiskEngine
 from bot.scanner.hot_scanner import HOT_MOMENTUM_SCANNER, HotMomentumScanner
+from bot.symbols import is_crypto, normalize_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +218,8 @@ class BotRunner:
                 })
             if hasattr(self.risk_engine, "register_order_in_flight"):
                 self.risk_engine.register_order_in_flight(symbol, risk_result.adjusted_quantity, current_price, asset_class)
+            if hasattr(self.risk_engine, "register_position_entry"):
+                self.risk_engine.register_position_entry(symbol, current_price)
         logger.info("[ORDER_FILLED] 🚀 ¡Orden ejecutada en Alpaca para %s! %s %s u @ $%.2f", symbol, action.value, risk_result.adjusted_quantity, current_price)
         self.notifier.notify_order_execution(executed_order)
         try:
@@ -479,6 +482,39 @@ class BotRunner:
             if p.quantity <= 0:
                 continue
 
+            # Ensure position entry time is tracked for opportunity cost time-stop evaluation
+            norm_sym = normalize_symbol(p.symbol)
+            if hasattr(self.risk_engine, "_position_entry_times") and norm_sym not in self.risk_engine._position_entry_times:
+                entry_ts = None
+                if hasattr(self, "db") and self.db:
+                    try:
+                        recent_db_orders = self.db.get_recent_orders(limit=50)
+                        for o in recent_db_orders:
+                            if normalize_symbol(o.get("symbol", "")) == norm_sym and o.get("side") in ("BUY", OrderSide.BUY):
+                                c_at = o.get("created_at")
+                                if isinstance(c_at, str):
+                                    entry_ts = datetime.fromisoformat(c_at.replace("Z", "+00:00")).timestamp()
+                                elif isinstance(c_at, datetime):
+                                    entry_ts = c_at.timestamp()
+                                if entry_ts:
+                                    break
+                    except Exception:
+                        pass
+
+                if not entry_ts and hasattr(self.broker, "get_orders"):
+                    try:
+                        broker_orders = self.broker.get_orders(limit=50)
+                        for bo in broker_orders:
+                            if normalize_symbol(bo.symbol) == norm_sym and bo.side == OrderSide.BUY:
+                                if bo.created_at:
+                                    entry_ts = bo.created_at.timestamp()
+                                    break
+                    except Exception:
+                        pass
+
+                if hasattr(self.risk_engine, "register_position_entry"):
+                    self.risk_engine.register_position_entry(p.symbol, p.entry_price, entry_ts or time.time())
+
             try:
                 curr_price = self.broker.get_current_price(p.symbol)
             except Exception:
@@ -711,7 +747,18 @@ class BotRunner:
                         )
                         continue  # Runner position stays open with tight stop and extended target!
 
-            should_exit = is_target_tp or is_stop_loss
+            # Check Opportunity Cost Time-Stop (Capital Rotation for stagnant crypto)
+            should_time_stop = False
+            time_stop_reason = ""
+            if hasattr(self.risk_engine, "evaluate_time_stop_exit"):
+                should_time_stop, time_stop_reason = self.risk_engine.evaluate_time_stop_exit(
+                    symbol=p.symbol,
+                    current_price=curr_price,
+                    entry_price=p.entry_price,
+                    current_qty=p.quantity,
+                )
+
+            should_exit = is_target_tp or is_stop_loss or should_time_stop
 
             if should_exit:
                 pnl_dollars = (curr_price - p.entry_price) * p.quantity
@@ -722,6 +769,11 @@ class BotRunner:
                     logger.info(
                         "[TARGET_TAKE_PROFIT] 🎯 OBJETIVO R:R ALCANZADO para %s a $%.2f (Meta: $%.2f, PnL: +$%.2f / +%.2f%%). Cosechando 100%% en el techo.",
                         p.symbol, curr_price, p.take_profit_price, pnl_dollars, pnl_pct,
+                    )
+                elif should_time_stop:
+                    logger.info(
+                        "[CAPITAL_ROTATION_TIME_STOP] ⏳ %s (PnL: %+$%.2f / %+.2f%%). Cerrando posición para rotar capital hacia líderes de momentum.",
+                        time_stop_reason, pnl_dollars, pnl_pct,
                     )
                 else:
                     logger.warning(
@@ -777,7 +829,8 @@ class BotRunner:
                         logger.debug("Failed to record trade outcome in pattern memory: %s", pe)
 
                 # Unified single source of truth for cooldowns and risk state
-                self.risk_engine.register_trade_exit(p.symbol, is_loss=is_loss)
+                is_stoploss_event = not should_time_stop and is_loss
+                self.risk_engine.register_trade_exit(p.symbol, is_loss=is_loss, is_stoploss_event=is_stoploss_event)
 
                 self.notifier.notify_order_execution(executed)
                 try:

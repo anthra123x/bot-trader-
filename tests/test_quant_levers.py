@@ -267,3 +267,111 @@ class TestPalancaDOrderBookImbalance:
         assert runner.identify_asset_class("AAPL") == AssetClass.EQUITY
         assert runner.identify_asset_class("NVDA") == AssetClass.EQUITY
 
+
+class TestIntelligentTimeStopRotation:
+    """Tests for Opportunity Cost Time-Stop & Capital Rotation Guard."""
+
+    def test_crypto_stagnant_position_triggers_time_stop(self):
+        import time
+        config = BotRiskConfig(
+            enable_time_stop_rotation=True,
+            max_crypto_stagnant_hours=4.0,
+            stagnant_range_pct=1.2,
+        )
+        engine = RiskEngine(config=config)
+        now = time.time()
+        entry_time = now - (4.5 * 3600.0)  # 4.5 hours ago
+
+        engine.register_position_entry("DOGE-USD", entry_price=0.0800, timestamp=entry_time)
+
+        # Current price: 0.07936 (-0.8% PnL, trapped in stagnation band)
+        should_exit, reason = engine.evaluate_time_stop_exit(
+            symbol="DOGE-USD",
+            current_price=0.07936,
+            entry_price=0.0800,
+            current_qty=5000.0,
+        )
+        assert should_exit is True
+        assert "Capital Rotation Time-Stop" in reason
+        assert "DOGE-USD" in reason
+
+    def test_crypto_fresh_position_does_not_trigger_time_stop(self):
+        import time
+        config = BotRiskConfig(
+            enable_time_stop_rotation=True,
+            max_crypto_stagnant_hours=4.0,
+            stagnant_range_pct=1.2,
+        )
+        engine = RiskEngine(config=config)
+        now = time.time()
+        entry_time = now - (1.5 * 3600.0)  # Only 1.5 hours ago
+
+        engine.register_position_entry("SOL-USD", entry_price=105.0, timestamp=entry_time)
+
+        should_exit, reason = engine.evaluate_time_stop_exit(
+            symbol="SOL-USD",
+            current_price=104.2,  # -0.76% PnL
+            entry_price=105.0,
+            current_qty=10.0,
+        )
+        assert should_exit is False
+        assert reason == ""
+
+    def test_crypto_profitable_runner_does_not_trigger_time_stop(self):
+        import time
+        config = BotRiskConfig(
+            enable_time_stop_rotation=True,
+            max_crypto_stagnant_hours=4.0,
+            stagnant_range_pct=1.2,
+        )
+        engine = RiskEngine(config=config)
+        now = time.time()
+        entry_time = now - (5.0 * 3600.0)  # 5.0 hours ago
+
+        engine.register_position_entry("ETH-USD", entry_price=2500.0, timestamp=entry_time)
+
+        # Current price: 2580.0 (+3.2% PnL, breakout above stagnation band)
+        should_exit, reason = engine.evaluate_time_stop_exit(
+            symbol="ETH-USD",
+            current_price=2580.0,
+            entry_price=2500.0,
+            current_qty=2.0,
+        )
+        assert should_exit is False
+
+    def test_equity_position_immune_to_crypto_time_stop(self):
+        import time
+        config = BotRiskConfig(
+            enable_time_stop_rotation=True,
+            max_crypto_stagnant_hours=4.0,
+            stagnant_range_pct=1.2,
+        )
+        engine = RiskEngine(config=config)
+        now = time.time()
+        entry_time = now - (8.0 * 3600.0)  # 8.0 hours ago
+
+        engine.register_position_entry("NVDA", entry_price=216.84, timestamp=entry_time)
+
+        # NVDA is an equity; closed overnight market hours must NOT trigger stagnation exit
+        should_exit, reason = engine.evaluate_time_stop_exit(
+            symbol="NVDA",
+            current_price=216.80,
+            entry_price=216.84,
+            current_qty=50.0,
+        )
+        assert should_exit is False
+
+    def test_time_stop_exit_does_not_trigger_stoploss_guard_circuit_breaker(self):
+        config = BotRiskConfig(cooldown_period_seconds=1800)
+        engine = RiskEngine(config=config)
+
+        # Register exit as time stop rotation (is_loss=True, is_stoploss_event=False)
+        engine.register_trade_exit("DOGE-USD", is_loss=True, is_stoploss_event=False)
+
+        # Specific symbol is in cooldown to prevent immediate churn
+        in_cd, _ = engine.is_in_cooldown("DOGE-USD")
+        assert in_cd is True
+
+        # But recent stoploss events list is EMPTY so circuit breaker is not triggered!
+        assert len(engine._recent_stoploss_events) == 0
+

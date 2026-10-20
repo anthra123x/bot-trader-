@@ -5,6 +5,7 @@ from typing import Any
 from bot.config import BotRiskConfig
 from bot.learning.pattern_memory import PatternMemory
 from bot.models import AccountBalance, AssetClass, OrderSide, Position, RiskValidationResult, TradeSignal
+from bot.symbols import is_crypto
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ class RiskEngine:
         self._peak_quarantined_profit: float = 0.0
         # In-flight orders tracker: symbol -> list of dicts (timestamp, qty, cost, asset_class)
         self._in_flight_orders: dict[str, list[dict[str, Any]]] = {}
+        # Position entry duration tracker for Opportunity Cost Time-Stop
+        self._position_entry_times: dict[str, float] = {}
 
     def register_order_in_flight(self, symbol: str, quantity: float, price: float, asset_class: AssetClass) -> None:
         """Track newly submitted order in-flight to prevent duplicate rapid pyramiding."""
@@ -153,7 +156,7 @@ class RiskEngine:
         norm_sym = normalize_symbol(symbol)
         return norm_sym in self._runner_extended or symbol in self._runner_extended
 
-    def register_trade_exit(self, symbol: str, is_loss: bool = False) -> None:
+    def register_trade_exit(self, symbol: str, is_loss: bool = False, is_stoploss_event: bool = True) -> None:
         """Register trade exit to activate Freqtrade CooldownPeriod and StoplossGuard."""
         now = time.time()
         norm_sym = normalize_symbol(symbol)
@@ -169,11 +172,86 @@ class RiskEngine:
         self._position_targets.pop(symbol, None)
         self.entry_contexts.pop(norm_sym, None)
         self.entry_contexts.pop(symbol, None)
+        self._position_entry_times.pop(norm_sym, None)
+        self._position_entry_times.pop(symbol, None)
         if is_loss:
             self._symbol_cooldowns[norm_sym] = now
-            self._recent_stoploss_events.append(now)
-            # Prune events older than 1 hour
-            self._recent_stoploss_events = [t for t in self._recent_stoploss_events if now - t < 3600.0]
+            if is_stoploss_event:
+                self._recent_stoploss_events.append(now)
+                # Prune events older than 1 hour
+                self._recent_stoploss_events = [t for t in self._recent_stoploss_events if now - t < 3600.0]
+
+    def register_position_entry(self, symbol: str, entry_price: float = 0.0, timestamp: float | None = None) -> None:
+        """Record entry timestamp for position duration tracking."""
+        norm_sym = normalize_symbol(symbol)
+        ts = timestamp if timestamp is not None and timestamp > 0 else time.time()
+        self._position_entry_times[norm_sym] = ts
+        self._position_entry_times[symbol] = ts
+
+    def get_position_duration_hours(self, symbol: str) -> float:
+        """Return the holding duration in hours for a symbol, or 0.0 if not tracked."""
+        norm_sym = normalize_symbol(symbol)
+        entry_ts = self._position_entry_times.get(norm_sym) or self._position_entry_times.get(symbol)
+        if not entry_ts:
+            return 0.0
+        return max(0.0, (time.time() - entry_ts) / 3600.0)
+
+    def evaluate_time_stop_exit(
+        self,
+        symbol: str,
+        current_price: float,
+        entry_price: float,
+        current_qty: float,
+        entry_timestamp: float | None = None,
+    ) -> tuple[bool, str]:
+        """Evaluate if position has exceeded stagnation time threshold (Opportunity Cost Time-Decay).
+        
+        Only applies to 24/7 crypto assets. If a crypto position remains trapped within a narrow
+        stagnation band (<= stagnant_range_pct, e.g. between stop loss and +1.2%) for >= max_crypto_stagnant_hours,
+        it triggers an exit to rotate capital into explosive momentum movers.
+        """
+        if not getattr(self.config, "enable_time_stop_rotation", True):
+            return False, ""
+        if current_price <= 0 or entry_price <= 0 or current_qty <= 0:
+            return False, ""
+
+        if not is_crypto(symbol):
+            # Equities do not trade 24/7; closed exchange hours must NOT be penalized as stagnation
+            return False, ""
+
+        norm_sym = normalize_symbol(symbol)
+        now = time.time()
+
+        # Resolve entry timestamp
+        entry_ts = entry_timestamp
+        if entry_ts is None or entry_ts <= 0:
+            entry_ts = self._position_entry_times.get(norm_sym) or self._position_entry_times.get(symbol)
+
+        if not entry_ts:
+            # First time seeing this position; record current timestamp and let observation window run
+            self.register_position_entry(symbol, entry_price, now)
+            return False, ""
+
+        elapsed_hours = (now - entry_ts) / 3600.0
+        max_hours = getattr(self.config, "max_crypto_stagnant_hours", 4.0)
+
+        if elapsed_hours < max_hours:
+            return False, ""
+
+        unrealized_pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
+        stagnant_band = getattr(self.config, "stagnant_range_pct", 1.2)
+
+        # Stagnant condition: Has not achieved breakout profit (> stagnant_band)
+        # e.g., hovering in chop between stop loss and +1.2%
+        if unrealized_pnl_pct <= stagnant_band:
+            reason = (
+                f"Capital Rotation Time-Stop: {symbol} estancado por {elapsed_hours:.1f}h "
+                f"(PnL: {unrealized_pnl_pct:+.2f}%, umbral <= +{stagnant_band:.1f}%). "
+                f"Rotando liquidez hacia líderes de momentum."
+            )
+            return True, reason
+
+        return False, ""
 
     def is_in_cooldown(self, symbol: str) -> tuple[bool, float]:
         """Check if symbol is currently in cooldown after a stop-loss exit (Freqtrade CooldownPeriod)."""
