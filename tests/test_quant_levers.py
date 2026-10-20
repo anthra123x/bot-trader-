@@ -257,3 +257,13 @@ class TestPalancaDOrderBookImbalance:
         # Quantity should be reduced to 55% of normal
         assert res_overhang.adjusted_quantity < res_normal.adjusted_quantity
         assert pytest.approx(res_overhang.adjusted_quantity, rel=1e-2) == round(res_normal.adjusted_quantity * 0.55, 6)
+
+    def test_runner_identifies_discovered_crypto_assets(self):
+        from bot.runner import BotRunner
+        runner = BotRunner()
+        assert runner.identify_asset_class("NEAR-USD") == AssetClass.CRYPTO
+        assert runner.identify_asset_class("SOL/USD") == AssetClass.CRYPTO
+        assert runner.identify_asset_class("BTC-USD") == AssetClass.CRYPTO
+        assert runner.identify_asset_class("AAPL") == AssetClass.EQUITY
+        assert runner.identify_asset_class("NVDA") == AssetClass.EQUITY
+
