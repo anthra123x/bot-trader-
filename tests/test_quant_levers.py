@@ -533,3 +533,209 @@ class TestPrecisionAgainstRandomness:
         assert tightened_t == pytest.approx(0.69, rel=1e-2)
         assert "mayor exigencia" in reason
 
+
+class TestSystemicEnhancementsAndSanitization:
+    """Tests for the 4 critical production hardening improvements."""
+
+    def test_alpaca_order_quantity_normalization(self):
+        from bot.brokers.alpaca import AlpacaBroker
+        broker = AlpacaBroker()
+
+        # BTC: 4 decimals (step 0.0001)
+        assert broker.normalize_order_quantity("BTC-USD", 0.0123987, is_crypto=True) == 0.0123
+        # ETH: 3 decimals (step 0.001)
+        assert broker.normalize_order_quantity("ETH/USD", 1.4569, is_crypto=True) == 1.456
+        # SOL: 2 decimals (step 0.01)
+        assert broker.normalize_order_quantity("SOL-USD", 15.6789, is_crypto=True) == 15.67
+        # DOGE: 0 decimals (step 1.0)
+        assert broker.normalize_order_quantity("DOGE-USD", 250.85, is_crypto=True) == 250.0
+        # Equities: integer shares
+        assert broker.normalize_order_quantity("NVDA", 12.8, is_crypto=False) == 12.0
+        assert broker.normalize_order_quantity("AAPL", -5.0, is_crypto=False) == 0.0
+
+    @patch("bot.brokers.alpaca.requests.post")
+    def test_alpaca_crypto_order_sanitization_removes_brackets(self, mock_post):
+        """Alpaca crypto orders must NOT contain bracket/stop_loss in payload (HTTP 422 defense)."""
+        from bot.brokers.alpaca import AlpacaBroker
+        from bot.models import Order, OrderType, OrderStatus
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"id": "order-12345"}
+        mock_post.return_value = mock_resp
+
+        broker = AlpacaBroker(api_key="mock_key", secret_key="mock_sec")
+
+        crypto_order = Order(
+            order_id="test1",
+            symbol="BTC-USD",
+            asset_class=AssetClass.CRYPTO,
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            quantity=0.012345,
+            stop_loss_price=60000.0,
+            take_profit_price=70000.0,
+            status=OrderStatus.PENDING,
+        )
+
+        broker.submit_order(crypto_order)
+        assert mock_post.called
+        sent_payload = mock_post.call_args[1]["json"]
+        assert "stop_loss" not in sent_payload
+        assert "take_profit" not in sent_payload
+        assert sent_payload["time_in_force"] == "gtc"
+        assert sent_payload["qty"] == "0.0123"
+
+    @patch("bot.brokers.alpaca.requests.post")
+    def test_alpaca_equity_order_preserves_brackets(self, mock_post):
+        """Equities should include bracket payload when stops and targets are defined."""
+        from bot.brokers.alpaca import AlpacaBroker
+        from bot.models import Order, OrderType, OrderStatus
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"id": "equity-order-1"}
+        mock_post.return_value = mock_resp
+
+        broker = AlpacaBroker(api_key="mock_key", secret_key="mock_sec")
+
+        stock_order = Order(
+            order_id="test2",
+            symbol="NVDA",
+            asset_class=AssetClass.EQUITY,
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            quantity=10.5,
+            stop_loss_price=135.0,
+            take_profit_price=150.0,
+            status=OrderStatus.PENDING,
+        )
+
+        broker.submit_order(stock_order)
+        sent_payload = mock_post.call_args[1]["json"]
+        assert sent_payload["order_class"] == "bracket"
+        assert "stop_loss" in sent_payload
+        assert sent_payload["stop_loss"]["stop_price"] == "135.0"
+        assert "take_profit" in sent_payload
+        assert sent_payload["take_profit"]["limit_price"] == "150.0"
+        assert sent_payload["qty"] == "10.0"
+
+    def test_spread_guard_blocks_excessive_spread(self):
+        """Spread Guard must reject entries when spread exceeds max_allowed_spread_pct."""
+        config = BotRiskConfig(
+            enable_spread_guard=True,
+            max_allowed_spread_pct=0.45,
+        )
+        engine = RiskEngine(config=config)
+        bal = AccountBalance(cash=50000.0, equity=50000.0, buying_power=50000.0, initial_day_equity=50000.0)
+
+        # 1. Spread = 0.85% > 0.45% -> Rejected by Spread Guard
+        wide_spread_signal = TradeSignal(
+            symbol="DOGE-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-19",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.85,
+            current_price=0.15,
+            stop_loss=0.145,
+            metrics={"spread_pct": 0.85, "rsi": 50.0, "ema_ratio": 1.01, "atr": 0.005},
+        )
+        res = engine.evaluate(wide_spread_signal, bal, positions=[])
+        assert res.is_approved is False
+        assert any("[SPREAD_GUARD]" in r for r in res.rejection_reasons)
+
+        # 2. Spread = 0.12% <= 0.45% -> Approved
+        tight_spread_signal = TradeSignal(
+            symbol="DOGE-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-19",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.85,
+            current_price=0.15,
+            stop_loss=0.145,
+            metrics={"spread_pct": 0.12, "rsi": 50.0, "ema_ratio": 1.01, "atr": 0.005},
+        )
+        res_ok = engine.evaluate(tight_spread_signal, bal, positions=[])
+        assert res_ok.is_approved is True
+        assert any("[SPREAD_GUARD]" in w for w in res_ok.risk_warnings)
+
+    def test_max_concurrent_crypto_cap(self):
+        """Risk Engine must reject 3rd crypto entry when max_concurrent_crypto_positions is 2."""
+        from bot.models import Position
+        config = BotRiskConfig(max_concurrent_crypto_positions=2)
+        engine = RiskEngine(config=config)
+        bal = AccountBalance(cash=50000.0, equity=50000.0, buying_power=50000.0, initial_day_equity=50000.0)
+
+        # Already holding 2 crypto assets
+        existing = [
+            Position(symbol="BTCUSD", asset_class=AssetClass.CRYPTO, quantity=0.1, entry_price=65000.0, current_price=65000.0),
+            Position(symbol="ETHUSD", asset_class=AssetClass.CRYPTO, quantity=2.0, entry_price=2600.0, current_price=2600.0),
+        ]
+
+        sol_signal = TradeSignal(
+            symbol="SOL-USD",
+            asset_class=AssetClass.CRYPTO,
+            trade_date="2026-10-19",
+            rating="Buy",
+            action=OrderSide.BUY,
+            confidence=0.88,
+            current_price=150.0,
+            stop_loss=145.0,
+            metrics={"rsi": 52.0, "ema_ratio": 1.01, "atr": 3.0},
+        )
+        res = engine.evaluate(sol_signal, bal, positions=existing)
+        assert res.is_approved is False
+        assert any("Límite de correlación cripto alcanzado" in r for r in res.rejection_reasons)
+
+    def test_position_state_save_and_hydration(self, tmp_path):
+        """Active position state (peak prices, TP stages, targets) must survive and hydrate."""
+        config = BotRiskConfig(enable_position_state_persistence=True)
+        engine = RiskEngine(config=config)
+
+        # Register position
+        engine.register_position_entry("NVDA", entry_price=100.0, timestamp=1729000000.0)
+        engine.register_position_targets("NVDA", entry_price=100.0, stop_loss=96.0, take_profit=112.0)
+        engine.register_partial_tp("NVDA")
+        engine.register_entry_context("NVDA", {"rsi": 53.5, "atr": 2.5})
+        engine._peak_prices["NVDA"] = 108.50
+
+        # Simulate manual dump and reload
+        state = {
+            "NVDA": {
+                "peak_price": 108.50,
+                "tp_stage": 1,
+                "partial_tp_executed": True,
+                "runner_extended": False,
+                "stop_loss": 96.0,
+                "take_profit": 112.0,
+                "entry_price": 100.0,
+                "entry_context": {"rsi": 53.5, "atr": 2.5},
+                "entry_time": 1729000000.0,
+            }
+        }
+        import json
+        json_str = json.dumps(state)
+
+        # Fresh engine (simulating container restart)
+        rebooted_engine = RiskEngine(config=config)
+        assert "NVDA" not in rebooted_engine._peak_prices
+
+        # Force hydration with JSON data
+        with patch.object(rebooted_engine, "hydrate_active_positions_state", wraps=rebooted_engine.hydrate_active_positions_state):
+            with patch("bot.database.neon_repo.get_neon_repo") as mock_neon:
+                mock_repo = MagicMock()
+                mock_repo.is_connected = True
+                mock_repo.get_system_config.return_value = json_str
+                mock_neon.return_value = mock_repo
+                rebooted_engine._force_test_hydration = True
+
+                count = rebooted_engine.hydrate_active_positions_state(["NVDA"])
+                assert count == 1
+                assert rebooted_engine._peak_prices["NVDA"] == 108.50
+                assert rebooted_engine.get_tp_stage("NVDA") == 1
+                assert rebooted_engine._position_targets["NVDA"]["take_profit"] == 112.0
+                assert rebooted_engine.get_entry_context("NVDA")["rsi"] == 53.5
+
+

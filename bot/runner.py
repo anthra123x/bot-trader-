@@ -205,14 +205,29 @@ class BotRunner:
             logger.info("[DECISION] 🛡️ %s: Sin orden ejecutada (%s) - Capital resguardado", symbol, reasons)
             return None
 
-        # Create Order
+        # Create Order with Slippage Guard (Marketable Limit for Buy Orders)
+        use_marketable_limit = getattr(self.config.risk, "enable_marketable_limit_orders", True)
+        max_slippage_pct = getattr(self.config.risk, "max_marketable_slippage_pct", 0.20)
+
+        order_type = OrderType.MARKET
+        limit_price = None
+        if action == OrderSide.BUY and use_marketable_limit and current_price > 0:
+            order_type = OrderType.LIMIT
+            limit_price = round(current_price * (1.0 + (max_slippage_pct / 100.0)), 4)
+            logger.info(
+                "[MARKETABLE_LIMIT] 🛡️ %s: Orden de compra fijada como Marketable Limit a $%.4f "
+                "(precio actual $%.4f, máx slippage: +%.2f%%) para blindar contra 'flash spikes'.",
+                symbol, limit_price, current_price, max_slippage_pct
+            )
+
         order = Order(
             order_id=str(uuid.uuid4())[:8],
             symbol=symbol,
             asset_class=asset_class,
             side=action,
-            order_type=OrderType.MARKET,
+            order_type=order_type,
             quantity=risk_result.adjusted_quantity,
+            limit_price=limit_price,
             stop_loss_price=risk_result.stop_loss_price,
             take_profit_price=risk_result.take_profit_price,
             status=OrderStatus.PENDING,
@@ -293,8 +308,19 @@ class BotRunner:
                         "[ORDER_BOOK] 🚀 %s: Absorción compradora L2 detectada (Imbalance: %.2f). Entrada confirmada con soporte institucional.",
                         symbol, ob_analysis.imbalance_ratio
                     )
+                if ob_analysis and getattr(ob_analysis, "spread_pct", 0.0) > 0:
+                    screen_res.metrics["spread_pct"] = ob_analysis.spread_pct
             except Exception as obe:
                 logger.debug("Notice en análisis de libro L2 para %s: %s", symbol, obe)
+
+        # Microstructure Spread Guard: Ensure spread metric is captured for all assets
+        if "spread_pct" not in screen_res.metrics and hasattr(self.broker, "get_quote"):
+            try:
+                quote_data = self.broker.get_quote(symbol)
+                if quote_data and "spread_pct" in quote_data:
+                    screen_res.metrics["spread_pct"] = quote_data["spread_pct"]
+            except Exception:
+                pass
 
         # Build live EnhancedPortfolioContext so subagents reason with real account positions, cash, quant metrics & lessons
         portfolio_ctx = None
@@ -489,6 +515,10 @@ class BotRunner:
             total_equity = bal.equity
         except Exception as be:
             logger.debug("Could not fetch balance for position rebalancing: %s", be)
+
+        # Hydrate persistent risk state (peak prices, TP stages, targets) for all open positions
+        if hasattr(self.risk_engine, "hydrate_active_positions_state") and positions:
+            self.risk_engine.hydrate_active_positions_state([p.symbol for p in positions])
 
         for p in positions:
             if p.quantity <= 0:

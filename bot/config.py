@@ -70,7 +70,7 @@ class BotRiskConfig(BaseModel):
     # High-Conviction Institutional Quality Gate
     min_signal_confidence: float = Field(default=0.0, description="Minimum multi-agent conviction required for entry (0.0=disabled by default, 0.68 in runner)")
     # Correlated Exposure Limit (Systemic Risk Control)
-    max_concurrent_crypto_positions: int = Field(default=5, description="Max simultaneous crypto positions to prevent systemic portfolio risk")
+    max_concurrent_crypto_positions: int = Field(default=2, description="Max simultaneous crypto positions to prevent systemic portfolio risk")
 
     # Dynamic Portfolio Balancing & Concentration Trim (Capital Rotation)
     enable_dynamic_rebalancing: bool = Field(default=True, description="Enable capital rebalancing when single asset exceeds concentration cap")
@@ -84,7 +84,7 @@ class BotRiskConfig(BaseModel):
     profit_quarantine_ratio: float = Field(default=0.40, description="Ratio of cumulative net profit quarantined into untouchable cash vault (40%)")
     profit_quarantine_milestone_step: float = Field(default=200.0, description="Milestone profit step in USD to harvest and lock into untouchable vault (e.g. $200)")
     # Portfolio Aggregate Crypto Exposure Limit (Systemic Risk Control)
-    max_total_crypto_allocation_pct: float = Field(default=30.0, description="Max total portfolio allocation across all crypto assets combined (30%)")
+    max_total_crypto_allocation_pct: float = Field(default=25.0, description="Max total portfolio allocation across all crypto assets combined (25%)")
     # Portfolio-Level High-Water Mark Trailing Drawdown Protection (Peak Profit Lock)
     enable_portfolio_trailing_drawdown_guard: bool = Field(default=True, description="Enable portfolio peak high-water mark trailing drawdown guard")
     max_trailing_drawdown_from_peak_pct: float = Field(default=2.5, description="Max drawdown permitted from intraday peak equity (2.5%)")
@@ -135,6 +135,15 @@ class BotRiskConfig(BaseModel):
     enable_extended_symbol_quarantine: bool = Field(default=True, description="Quarantine specific symbol after consecutive losses")
     symbol_consecutive_losses_threshold: int = Field(default=2, description="Consecutive losses on single symbol before triggering extended quarantine (2)")
     extended_quarantine_seconds: int = Field(default=14400, description="Duration in seconds of extended quarantine cooldown (4 hours = 14400s)")
+
+    # 5. Spread & Slippage Guard (Microstructure Protection)
+    enable_spread_guard: bool = Field(default=True, description="Block or protect entries when bid/ask spread exceeds safe threshold")
+    max_allowed_spread_pct: float = Field(default=0.45, description="Maximum bid/ask spread % allowed for entries (0.45%)")
+    enable_marketable_limit_orders: bool = Field(default=True, description="Peg buy orders as marketable limits at ask*(1+max_slippage) to prevent flash fills")
+    max_marketable_slippage_pct: float = Field(default=0.20, description="Max allowable slippage percentage above ask price (0.20%)")
+
+    # 6. Active Position State Persistence (Survives container restarts)
+    enable_position_state_persistence: bool = Field(default=True, description="Persist high-water mark peak prices, TP stages, targets and entry context in Neon DB")
 
 
 class BotConfig(BaseModel):

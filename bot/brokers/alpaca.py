@@ -10,6 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -283,12 +284,71 @@ class AlpacaBroker(BaseBroker):
             return f"{s[:-3]}/USD"
         return s
 
+    def normalize_order_quantity(self, symbol: str, qty: float, is_crypto: bool) -> float:
+        """Normalize order quantity to adhere strictly to Alpaca asset precision and lot sizes."""
+        if qty <= 0:
+            return 0.0
+        if not is_crypto:
+            return float(math.floor(qty))
+
+        sym = symbol.upper().replace("-", "/").strip()
+        if "BTC" in sym:
+            factor = 10000.0  # 4 decimals (min 0.0001)
+        elif "ETH" in sym:
+            factor = 1000.0   # 3 decimals (min 0.001)
+        elif any(k in sym for k in ("DOGE", "SHIB")):
+            factor = 1.0      # 0 decimals (integer lot 1.0)
+        elif any(k in sym for k in ("SOL", "AVAX", "LINK", "LTC", "BCH", "AAVE", "UNI", "MATIC")):
+            factor = 100.0    # 2 decimals (min 0.01)
+        else:
+            factor = 10000.0  # 4 decimals default fallback
+
+        floored = math.floor(qty * factor) / factor
+        if factor == 1.0:
+            return float(int(floored))
+        decimals = int(math.log10(factor))
+        return round(floored, decimals)
+
+    def get_quote(self, symbol: str) -> dict[str, float] | None:
+        """Fetch latest Bid and Ask quote from Alpaca to calculate spread and protect execution."""
+        alpaca_sym = self._to_alpaca_symbol(symbol)
+        is_crypto = "/" in alpaca_sym or "-USD" in symbol.upper()
+
+        if self._has_direct_keys():
+            if is_crypto:
+                endpoint = f"{self.data_url}/v1beta3/crypto/us/latest/quotes?symbols={requests.utils.quote(alpaca_sym)}"
+            else:
+                endpoint = f"{self.data_url}/v2/stocks/{symbol}/quotes/latest"
+
+            try:
+                resp = requests.get(endpoint, headers=self._headers(), timeout=5)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    q = data.get("quotes", {}).get(alpaca_sym) if is_crypto else data.get("quote", {})
+                    if q and "bp" in q and "ap" in q:
+                        bp = float(q["bp"])
+                        ap = float(q["ap"])
+                        mid = (bp + ap) / 2.0 if (bp + ap) > 0 else bp
+                        spread_pct = ((ap - bp) / mid * 100.0) if mid > 0 else 0.0
+                        return {"bid": bp, "ask": ap, "mid": mid, "spread_pct": round(spread_pct, 4)}
+            except Exception as e:
+                logger.debug("Alpaca quote fetch notice for %s: %s", symbol, e)
+        return None
+
     def submit_order(self, order: Order) -> Order:
         side = "buy" if order.side == OrderSide.BUY else "sell"
         alpaca_sym = self._to_alpaca_symbol(order.symbol)
         is_crypto = "/" in alpaca_sym or "-USD" in order.symbol.upper()
         time_in_force = "gtc" if is_crypto else "day"
         
+        # Normalize quantity to meet asset-specific lot step rules and prevent HTTP 422
+        normalized_qty = self.normalize_order_quantity(order.symbol, float(order.quantity), is_crypto)
+        if normalized_qty <= 0:
+            order.status = OrderStatus.REJECTED
+            order.rejection_reason = f"Normalized quantity is 0 for {order.symbol} (raw: {order.quantity})"
+            return order
+        order.quantity = normalized_qty
+
         if self._has_direct_keys():
             url = f"{self.base_url}/v2/orders"
             order_payload: dict[str, Any] = {
@@ -300,10 +360,17 @@ class AlpacaBroker(BaseBroker):
             }
             if order.order_type == OrderType.LIMIT and order.limit_price:
                 order_payload["limit_price"] = str(order.limit_price)
-            if order.stop_loss_price:
-                order_payload["stop_loss"] = {"stop_price": str(order.stop_loss_price)}
-            if order.take_profit_price:
-                order_payload["take_profit"] = {"limit_price": str(order.take_profit_price)}
+
+            # Alpaca API: Stop-loss and bracket orders are NOT supported for crypto assets
+            # (must be managed client-side in the monitoring loop)
+            if not is_crypto:
+                if order.stop_loss_price and order.take_profit_price:
+                    order_payload["order_class"] = "bracket"
+                    order_payload["stop_loss"] = {"stop_price": str(order.stop_loss_price)}
+                    order_payload["take_profit"] = {"limit_price": str(order.take_profit_price)}
+                elif order.stop_loss_price:
+                    order_payload["order_class"] = "oto"
+                    order_payload["stop_loss"] = {"stop_price": str(order.stop_loss_price)}
 
             resp = requests.post(url, headers=self._headers(), json=order_payload, timeout=10)
             if resp.status_code in (200, 201):
@@ -330,7 +397,7 @@ class AlpacaBroker(BaseBroker):
             ]
             if order.order_type == OrderType.LIMIT and order.limit_price:
                 cli_args.extend(["--limit-price", str(order.limit_price)])
-            if order.stop_loss_price:
+            if not is_crypto and order.stop_loss_price:
                 cli_args.extend(["--stop-price", str(order.stop_loss_price)])
 
             try:

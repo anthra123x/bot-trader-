@@ -24,6 +24,9 @@ class OrderBookAnalysis:
     ask_depth_usd: float
     bias: str  # "BULLISH_ABSORPTION", "SELLER_OVERHANG", "NEUTRAL"
     details: str
+    spread_pct: float = 0.0  # Bid/Ask spread percentage
+    best_bid: float = 0.0
+    best_ask: float = 0.0
 
 
 class OrderBookAnalyzer:
@@ -130,6 +133,12 @@ class OrderBookAnalyzer:
                 self._cache[norm_sym] = (now, res)
                 return res
 
+            # Extract best bid, best ask and spread percentage
+            best_bid = float(bids[0].get("p", 0.0))
+            best_ask = float(asks[0].get("p", 0.0))
+            mid_price = (best_bid + best_ask) / 2.0 if (best_bid + best_ask) > 0 else best_bid
+            spread_pct = round(((best_ask - best_bid) / mid_price) * 100.0, 4) if mid_price > 0 else 0.0
+
             # Sum top 10 bids & asks in USD value
             bid_depth_usd = sum(float(b.get("p", 0.0)) * float(b.get("s", 0.0)) for b in bids[:10])
             ask_depth_usd = sum(float(a.get("p", 0.0)) * float(a.get("s", 0.0)) for a in asks[:10])
@@ -156,6 +165,9 @@ class OrderBookAnalyzer:
                 ask_depth_usd=round(ask_depth_usd, 2),
                 bias=bias,
                 details=details,
+                spread_pct=spread_pct,
+                best_bid=best_bid,
+                best_ask=best_ask,
             )
             self._cache[norm_sym] = (now, res)
             return res

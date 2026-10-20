@@ -1,5 +1,7 @@
+import json
 import logging
 import math
+import os
 import time
 from typing import Any
 import numpy as np
@@ -47,6 +49,8 @@ class RiskEngine:
         self._position_entry_times: dict[str, float] = {}
         # Consecutive loss streak per symbol for Extended Quarantine
         self._symbol_loss_streak: dict[str, int] = {}
+        # Hydrate active positions and risk states from Neon DB / local cache
+        self.hydrate_active_positions_state()
 
     def register_order_in_flight(self, symbol: str, quantity: float, price: float, asset_class: AssetClass) -> None:
         """Track newly submitted order in-flight to prevent duplicate rapid pyramiding."""
@@ -77,11 +81,145 @@ class RiskEngine:
                 total += o.get("cost", 0.0)
         return total
 
+    # --------------------------------------------------------------------------
+    # ACTIVE POSITIONS STATE PERSISTENCE (Cloud Reboot Resilience)
+    # --------------------------------------------------------------------------
+
+    def save_active_positions_state(self) -> None:
+        """Persist current active positions' risk state (peaks, TP stages, targets, contexts) to Neon & local cache."""
+        if not getattr(self.config, "enable_position_state_persistence", True):
+            return
+        if "PYTEST_CURRENT_TEST" in os.environ:
+            return
+
+        state: dict[str, Any] = {}
+        all_symbols = set(self._position_targets.keys()) | set(self._peak_prices.keys()) | set(self._position_entry_times.keys())
+        for sym in all_symbols:
+            norm_sym = normalize_symbol(sym)
+            targets = self._position_targets.get(norm_sym, {})
+            state[norm_sym] = {
+                "peak_price": self._peak_prices.get(norm_sym, 0.0),
+                "tp_stage": self._partial_tp_stages.get(norm_sym, 0),
+                "partial_tp_executed": norm_sym in self._partial_tp_executed,
+                "runner_extended": norm_sym in self._runner_extended,
+                "stop_loss": targets.get("stop_loss", 0.0),
+                "take_profit": targets.get("take_profit"),
+                "entry_price": targets.get("entry_price", 0.0),
+                "entry_context": self.entry_contexts.get(norm_sym, {}),
+                "entry_time": self._position_entry_times.get(norm_sym, 0.0),
+                "cooldown_until": self._symbol_cooldowns.get(norm_sym, 0.0),
+                "loss_streak": self._symbol_loss_streak.get(norm_sym, 0),
+            }
+
+        try:
+            json_str = json.dumps(state)
+        except Exception as je:
+            logger.debug("[PERSISTENCE] JSON serialization notice: %s", je)
+            return
+
+        # 1. Persist to Neon DB system_config
+        try:
+            from bot.database.neon_repo import get_neon_repo
+            repo = get_neon_repo()
+            if repo.is_connected:
+                repo.set_system_config("ACTIVE_POSITIONS_STATE", json_str)
+        except Exception as ne:
+            logger.debug("[PERSISTENCE] Neon position state save notice: %s", ne)
+
+        # 2. Persist to local filesystem fallback
+        try:
+            cache_dir = os.path.join(os.getcwd(), "data")
+            os.makedirs(cache_dir, exist_ok=True)
+            cache_file = os.path.join(cache_dir, "active_positions_state.json")
+            with open(cache_file, "w", encoding="utf-8") as f:
+                f.write(json_str)
+        except Exception as fe:
+            logger.debug("[PERSISTENCE] File position state save notice: %s", fe)
+
+    def hydrate_active_positions_state(self, open_positions_symbols: list[str] | None = None) -> int:
+        """Hydrate in-memory risk trackers from Neon DB / local cache to recover state after reboot."""
+        if not getattr(self.config, "enable_position_state_persistence", True):
+            return 0
+        if "PYTEST_CURRENT_TEST" in os.environ and not getattr(self, "_force_test_hydration", False):
+            return 0
+
+        raw_json = None
+        # Try Neon first
+        try:
+            from bot.database.neon_repo import get_neon_repo
+            repo = get_neon_repo()
+            if repo.is_connected:
+                raw_json = repo.get_system_config("ACTIVE_POSITIONS_STATE")
+        except Exception as ne:
+            logger.debug("[PERSISTENCE] Neon position state load notice: %s", ne)
+
+        # Fallback to local file
+        if not raw_json:
+            cache_file = os.path.join(os.getcwd(), "data", "active_positions_state.json")
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, "r", encoding="utf-8") as f:
+                        raw_json = f.read()
+                except Exception as fe:
+                    logger.debug("[PERSISTENCE] File position state load notice: %s", fe)
+
+        if not raw_json:
+            return 0
+
+        try:
+            state = json.loads(raw_json)
+        except Exception:
+            return 0
+
+        filter_symbols = {normalize_symbol(s) for s in open_positions_symbols} if open_positions_symbols is not None else None
+        hydrated_count = 0
+
+        for norm_sym, data in state.items():
+            if filter_symbols is not None and norm_sym not in filter_symbols:
+                if data.get("cooldown_until"):
+                    self._symbol_cooldowns[norm_sym] = float(data["cooldown_until"])
+                if data.get("loss_streak"):
+                    self._symbol_loss_streak[norm_sym] = int(data["loss_streak"])
+                continue
+
+            if data.get("peak_price", 0.0) > 0:
+                self._peak_prices[norm_sym] = float(data["peak_price"])
+            if data.get("tp_stage", 0) > 0:
+                self._partial_tp_stages[norm_sym] = int(data["tp_stage"])
+            if data.get("partial_tp_executed"):
+                self._partial_tp_executed.add(norm_sym)
+            if data.get("runner_extended"):
+                self._runner_extended.add(norm_sym)
+            if data.get("stop_loss", 0.0) > 0 or data.get("take_profit"):
+                self._position_targets[norm_sym] = {
+                    "entry_price": float(data.get("entry_price", 0.0)),
+                    "stop_loss": float(data.get("stop_loss", 0.0)),
+                    "take_profit": float(data["take_profit"]) if data.get("take_profit") else None,
+                }
+            if data.get("entry_context"):
+                self.entry_contexts[norm_sym] = data["entry_context"]
+            if data.get("entry_time", 0.0) > 0:
+                self._position_entry_times[norm_sym] = float(data["entry_time"])
+            if data.get("cooldown_until"):
+                self._symbol_cooldowns[norm_sym] = float(data["cooldown_until"])
+            if data.get("loss_streak"):
+                self._symbol_loss_streak[norm_sym] = int(data["loss_streak"])
+
+            hydrated_count += 1
+
+        if hydrated_count > 0:
+            logger.info(
+                "[PERSISTENCE] 💾 Estado de posiciones activas hidratado exitosamente (%d posiciones restauradas).",
+                hydrated_count
+            )
+        return hydrated_count
+
     def register_entry_context(self, symbol: str, context: dict[str, Any]) -> None:
         """Register technical metrics at entry for post-trade feedback and learning."""
         norm_sym = normalize_symbol(symbol)
         self.entry_contexts[norm_sym] = context
         self.entry_contexts[symbol] = context
+        self.save_active_positions_state()
 
     def get_entry_context(self, symbol: str) -> dict[str, Any]:
         """Retrieve technical metrics captured when position was entered."""
@@ -99,6 +237,7 @@ class RiskEngine:
             "stop_loss": stop_loss,
             "take_profit": take_profit,
         }
+        self.save_active_positions_state()
 
     def get_position_targets(self, symbol: str, entry_price: float) -> dict[str, float]:
         """Retrieve target TP and SL for a position. If not tracked, generates based on R:R config."""
@@ -130,6 +269,7 @@ class RiskEngine:
             "stop_loss": fallback_sl,
             "take_profit": fallback_tp,
         }
+        self.save_active_positions_state()
         return self._position_targets[norm_sym]
 
     def update_position_stop(self, symbol: str, new_stop: float) -> None:
@@ -139,6 +279,7 @@ class RiskEngine:
             curr_sl = self._position_targets[norm_sym]["stop_loss"]
             if new_stop > curr_sl:
                 self._position_targets[norm_sym]["stop_loss"] = new_stop
+                self.save_active_positions_state()
 
     def set_position_target_tp(self, symbol: str, new_tp: float) -> None:
         """Update target take profit (e.g. for dynamic runner target extension)."""
@@ -147,12 +288,14 @@ class RiskEngine:
             self._position_targets[norm_sym]["take_profit"] = new_tp
         if symbol in self._position_targets:
             self._position_targets[symbol]["take_profit"] = new_tp
+        self.save_active_positions_state()
 
     def register_runner_extended(self, symbol: str) -> None:
         """Mark runner target extension as active for current position lifecycle."""
         norm_sym = normalize_symbol(symbol)
         self._runner_extended.add(norm_sym)
         self._runner_extended.add(symbol)
+        self.save_active_positions_state()
 
     def is_runner_extended(self, symbol: str) -> bool:
         """Check if runner target extension has already occurred for this symbol."""
@@ -197,6 +340,7 @@ class RiskEngine:
         else:
             self._symbol_loss_streak.pop(norm_sym, None)
             self._symbol_loss_streak.pop(symbol, None)
+        self.save_active_positions_state()
 
     def register_position_entry(self, symbol: str, entry_price: float = 0.0, timestamp: float | None = None) -> None:
         """Record entry timestamp for position duration tracking."""
@@ -204,6 +348,11 @@ class RiskEngine:
         ts = timestamp if timestamp is not None and timestamp > 0 else time.time()
         self._position_entry_times[norm_sym] = ts
         self._position_entry_times[symbol] = ts
+        if entry_price > 0:
+            peak = max(self._peak_prices.get(norm_sym, entry_price), entry_price)
+            self._peak_prices[norm_sym] = peak
+            self._peak_prices[symbol] = peak
+        self.save_active_positions_state()
 
     def get_position_duration_hours(self, symbol: str) -> float:
         """Return the holding duration in hours for a symbol, or 0.0 if not tracked."""
@@ -470,6 +619,7 @@ class RiskEngine:
         self._partial_tp_stages[symbol] = new_stage
         self._partial_tp_executed.add(norm_sym)
         self._partial_tp_executed.add(symbol)
+        self.save_active_positions_state()
 
     def get_tp_stage(self, symbol: str) -> int:
         """Return current take profit stage executed for symbol (0=none, 1=stage 1, 2=stage 2)."""
@@ -618,6 +768,9 @@ class RiskEngine:
                     symbol, candidate_sl, peak, dynamic_distance
                 )
 
+        if was_updated:
+            self.save_active_positions_state()
+
         return candidate_sl, was_updated
 
     def evaluate(
@@ -763,7 +916,7 @@ class RiskEngine:
 
         # 8. Correlated Crypto Exposure Gatekeeper (Max concurrent crypto positions & Aggregate Cap)
         if signal.action == OrderSide.BUY and signal.asset_class == AssetClass.CRYPTO:
-            max_crypto_pos = getattr(self.config, "max_concurrent_crypto_positions", 4)
+            max_crypto_pos = getattr(self.config, "max_concurrent_crypto_positions", 2)
             crypto_positions_count = sum(1 for p in positions if p.asset_class == AssetClass.CRYPTO and p.quantity > 0)
             existing_pos = next((p for p in positions if normalize_symbol(p.symbol) == norm_sym), None)
             if not existing_pos and crypto_positions_count >= max_crypto_pos:
@@ -771,10 +924,9 @@ class RiskEngine:
                     f"Límite de correlación cripto alcanzado: {crypto_positions_count} activos en cartera "
                     f"(máx: {max_crypto_pos}). Capital preservado contra riesgo sistémico de mercado."
                 )
-                return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
 
-            # Hard Aggregate Crypto Exposure Cap (e.g. max 30% of portfolio in crypto)
-            max_crypto_cap_pct = getattr(self.config, "max_total_crypto_allocation_pct", 30.0)
+            # Hard Aggregate Crypto Exposure Cap (e.g. max 25% or 30% of portfolio in crypto)
+            max_crypto_cap_pct = getattr(self.config, "max_total_crypto_allocation_pct", 25.0)
             max_crypto_dollars = balance.equity * (max_crypto_cap_pct / 100.0)
             current_crypto_val = sum(
                 p.market_value for p in positions if p.asset_class == AssetClass.CRYPTO and p.quantity > 0
@@ -788,7 +940,21 @@ class RiskEngine:
                     f"({(total_active_crypto / balance.equity) * 100.0:.1f}% >= {max_crypto_cap_pct:.1f}% máx de ${max_crypto_dollars:,.2f}). "
                     f"Portafolio protegido contra sobre-concentración y volatilidad sistémica."
                 )
+
+            if rejection_reasons:
                 return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+
+        # 8a. Spread Guard: Microstructure Slippage & Flash Spread Defense
+        spread_pct = float(signal.metrics.get("spread_pct", 0.0))
+        max_allowed_spread = getattr(self.config, "max_allowed_spread_pct", 0.45)
+        if signal.action == OrderSide.BUY and getattr(self.config, "enable_spread_guard", True) and spread_pct > max_allowed_spread:
+            rejection_reasons.append(
+                f"[SPREAD_GUARD] 🛡️ Spread Bid/Ask excesivo ({spread_pct:.2f}% > {max_allowed_spread:.2f}% máx). "
+                f"Entrada bloqueada para proteger margen contra creadores de mercado."
+            )
+            return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+        elif spread_pct > 0 and signal.action == OrderSide.BUY:
+            warnings.append(f"[SPREAD_GUARD] 🔍 Spread Bid/Ask verificado seguro ({spread_pct:.2f}% <= {max_allowed_spread:.2f}%).")
 
         # 8b. Meta-Labeling Binary Quality Filter (Marcos López de Prado)
         if signal.action == OrderSide.BUY and getattr(self.config, "enable_meta_labeling", True):
