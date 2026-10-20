@@ -107,6 +107,18 @@ class RiskEngine:
         min_reward = default_sl_distance * self.config.min_risk_reward_ratio
         fallback_tp = round(entry_price + min_reward, 4)
 
+        # Palanca C: Elastic take-profit expansion if volatility ATR is tracked
+        ctx = self.get_entry_context(symbol)
+        atr_pct = float(ctx.get("atr_pct", 0.0))
+        if atr_pct <= 0.0 and ctx.get("atr"):
+            atr_val = float(ctx.get("atr", 0.0))
+            atr_pct = (atr_val / entry_price * 100.0) if entry_price > 0 else 0.0
+
+        if getattr(self.config, "enable_adaptive_atr_targets", True) and atr_pct > 0.0:
+            atr_tp_dist = entry_price * ((atr_pct * getattr(self.config, "atr_tp_multiplier_stage2", 3.0)) / 100.0)
+            if atr_tp_dist > min_reward:
+                fallback_tp = round(entry_price + atr_tp_dist, 4)
+
         self._position_targets[norm_sym] = {
             "entry_price": entry_price,
             "stop_loss": fallback_sl,
@@ -179,24 +191,38 @@ class RiskEngine:
         stage = self._partial_tp_stages.get(norm_sym, 0)
         unrealized_profit_pct = ((current_price - entry_price) / entry_price) * 100.0
 
-        # Stage 1: Initial scale-out threshold (+1.2%)
-        if stage == 0 and unrealized_profit_pct >= self.config.partial_take_profit_threshold_pct:
+        # Palanca C: Adaptive Volatility ATR Elastic Take-Profit Floors
+        ctx = self.get_entry_context(symbol)
+        atr_pct = float(ctx.get("atr_pct", 0.0))
+        if atr_pct <= 0.0 and ctx.get("atr"):
+            atr_val = float(ctx.get("atr", 0.0))
+            atr_pct = (atr_val / entry_price * 100.0) if entry_price > 0 else 0.0
+
+        stage1_thresh = self.config.partial_take_profit_threshold_pct
+        stage2_thresh = getattr(self.config, "stage2_take_profit_threshold_pct", 4.5)
+        stage3_thresh = getattr(self.config, "stage3_take_profit_threshold_pct", 8.0)
+
+        if getattr(self.config, "enable_adaptive_atr_targets", True) and atr_pct > 0.0:
+            stage1_thresh = max(stage1_thresh, atr_pct * getattr(self.config, "atr_tp_multiplier_stage1", 1.5))
+            stage2_thresh = max(stage2_thresh, atr_pct * getattr(self.config, "atr_tp_multiplier_stage2", 3.0))
+            stage3_thresh = max(stage3_thresh, atr_pct * getattr(self.config, "atr_tp_multiplier_stage3", 5.0))
+
+        # Stage 1: Initial scale-out threshold
+        if stage == 0 and unrealized_profit_pct >= stage1_thresh:
             partial_qty = round(current_qty * self.config.partial_take_profit_ratio, 6)
             if 0 < partial_qty < current_qty:
                 return True, partial_qty
 
-        # Stage 2: Secondary scale-out threshold (+3.0%)
+        # Stage 2: Secondary scale-out threshold
         if stage == 1 and getattr(self.config, "enable_multi_stage_tp", True):
-            stage2_thresh = getattr(self.config, "stage2_take_profit_threshold_pct", 3.0)
             stage2_ratio = getattr(self.config, "stage2_take_profit_ratio", 0.45)
             if unrealized_profit_pct >= stage2_thresh:
                 stage2_qty = round(current_qty * stage2_ratio, 6)
                 if 0 < stage2_qty < current_qty:
                     return True, stage2_qty
 
-        # Stage 3: Tertiary scale-out threshold (+5.5%)
+        # Stage 3: Tertiary scale-out threshold
         if stage == 2 and getattr(self.config, "enable_stage3_tp", True):
-            stage3_thresh = getattr(self.config, "stage3_take_profit_threshold_pct", 5.5)
             stage3_ratio = getattr(self.config, "stage3_take_profit_ratio", 0.50)
             if unrealized_profit_pct >= stage3_thresh:
                 stage3_qty = round(current_qty * stage3_ratio, 6)
@@ -697,8 +723,23 @@ class RiskEngine:
         safe_liquidity = max(0.0, available_liquidity * 0.98)
         qty_by_cash = safe_liquidity / current_price
 
+        # Palanca D: Order Book Imbalance / Level 2 Depth Adjustment
+        l2_multiplier = 1.0
+        if getattr(self.config, "enable_order_book_imbalance", True) and signal.metrics:
+            l2_imbalance = float(signal.metrics.get("l2_imbalance_ratio", 1.0))
+            if l2_imbalance <= getattr(self.config, "max_seller_overhang_ratio", 0.60):
+                l2_multiplier = 0.55  # Clamp capital allocation by 45% when heavy seller wall overhangs
+                warnings.append(
+                    f"[L2_DEPTH] 🧱 Muro vendedor pesado detectado ({l2_imbalance:.2f}x). "
+                    f"Asignación ajustada preventivamente al 55% para no comprar contra pared de oferta."
+                )
+            elif l2_imbalance >= getattr(self.config, "min_order_book_imbalance_ratio", 1.25):
+                warnings.append(
+                    f"[L2_DEPTH] 🚀 Absorción compradora confirmada en L2 ({l2_imbalance:.2f}x bids vs asks)."
+                )
+
         regime_sizing_factor = alloc_factor if 0.0 < alloc_factor < 1.0 else 1.0
-        target_qty = min(qty_by_risk, qty_by_alloc, qty_by_cash) * pattern_multiplier * regime_sizing_factor * prudence_multiplier
+        target_qty = min(qty_by_risk, qty_by_alloc, qty_by_cash) * pattern_multiplier * regime_sizing_factor * prudence_multiplier * l2_multiplier
 
         # Quantize shares (Equities: integer shares; Crypto: up to 6 decimals)
         if signal.asset_class == AssetClass.EQUITY:
@@ -719,15 +760,26 @@ class RiskEngine:
                 risk_warnings=warnings,
             )
 
-        # 6. Asymmetrical Risk/Reward Enforcement (Profit Expectancy >> Loss Expectancy)
+        # 6. Asymmetrical Risk/Reward Enforcement & Palanca C Adaptive ATR Targets
         take_profit = signal.target_price
         min_reward = risk_per_share * self.config.min_risk_reward_ratio
         min_take_profit = round(current_price + min_reward, 4)
 
+        # Palanca C: Elastic target calculation using ATR%
+        atr_pct = float(signal.metrics.get("atr_pct", 0.0))
+        if atr_pct <= 0.0 and signal.metrics.get("atr"):
+            atr_val = float(signal.metrics.get("atr", 0.0))
+            atr_pct = (atr_val / current_price * 100.0) if current_price > 0 else 0.0
+
+        elastic_take_profit = min_take_profit
+        if getattr(self.config, "enable_adaptive_atr_targets", True) and atr_pct > 0.0:
+            atr_target_dist = current_price * ((atr_pct * getattr(self.config, "atr_tp_multiplier_stage2", 3.0)) / 100.0)
+            elastic_take_profit = max(min_take_profit, round(current_price + atr_target_dist, 4))
+
         if take_profit is None or take_profit <= current_price:
-            take_profit = min_take_profit
+            take_profit = elastic_take_profit
             warnings.append(
-                f"Take-Profit calibrado asimétricamente a R:R {self.config.min_risk_reward_ratio:.1f}:1 (${take_profit:,.2f})"
+                f"Take-Profit calibrado asimétricamente con ATR ({atr_pct:.1f}% ATR) a ${take_profit:,.2f}"
             )
         else:
             reward = take_profit - current_price
@@ -737,6 +789,11 @@ class RiskEngine:
                 warnings.append(
                     f"R:R original ({rr_ratio:.2f}:1) elevado asimétricamente a {self.config.min_risk_reward_ratio:.1f}:1 (${take_profit:,.2f}) para maximizar margen de ganancia."
                 )
+            if take_profit < elastic_take_profit:
+                warnings.append(
+                    f"Take-Profit ampliado con Palanca C (ATR {atr_pct:.1f}%): ${take_profit:,.2f} -> ${elastic_take_profit:,.2f}"
+                )
+                take_profit = elastic_take_profit
 
         final_sl = round(stop_loss, 4)
         final_tp = round(take_profit, 4) if take_profit else None
@@ -748,6 +805,9 @@ class RiskEngine:
             stop_loss=final_sl,
             take_profit=final_tp,
         )
+        entry_ctx = dict(signal.metrics or {})
+        entry_ctx["atr_pct"] = atr_pct
+        self.register_entry_context(signal.symbol, entry_ctx)
 
         return RiskValidationResult(
             is_approved=True,

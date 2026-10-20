@@ -89,6 +89,28 @@ class BotRiskConfig(BaseModel):
     enable_portfolio_trailing_drawdown_guard: bool = Field(default=True, description="Enable portfolio peak high-water mark trailing drawdown guard")
     max_trailing_drawdown_from_peak_pct: float = Field(default=2.5, description="Max drawdown permitted from intraday peak equity (2.5%)")
 
+    # --- 4 PALANCAS CUANTITATIVAS DE MÁXIMO RENDIMIENTO ---
+    # Palanca A: Dynamic Hot Momentum Pool
+    enable_dynamic_hot_scanner: bool = Field(default=True, description="Dynamically scan and rank Top N crypto/equity momentum movers")
+    hot_scanner_top_n: int = Field(default=12, description="Number of top momentum assets to dynamically inject into universe")
+
+    # Palanca B: Multi-Timeframe Confluence (MTF)
+    enable_mtf_confluence: bool = Field(default=True, description="Multi-timeframe confluence filter (Macro trend + pullback trigger)")
+    mtf_bonus_score: float = Field(default=20.0, description="Conviction bonus points when multi-timeframe trend aligns (+20)")
+    mtf_penalty_score: float = Field(default=25.0, description="Conviction penalty when trading against macro trend (-25)")
+
+    # Palanca C: Adaptive Volatility ATR Elastic Take-Profits & Trailing Stops
+    enable_adaptive_atr_targets: bool = Field(default=True, description="Adaptive ATR-scaled take profit and trailing stop targets for explosive volatility")
+    atr_tp_multiplier_stage1: float = Field(default=1.5, description="ATR multiplier for Stage 1 partial take profit floor (1.5x)")
+    atr_tp_multiplier_stage2: float = Field(default=3.0, description="ATR multiplier for Stage 2 partial take profit floor (3.0x)")
+    atr_tp_multiplier_stage3: float = Field(default=5.0, description="ATR multiplier for Stage 3 partial take profit floor (5.0x)")
+    atr_tp_multiplier_runner: float = Field(default=8.0, description="ATR multiplier for dynamic runner extension (8.0x)")
+
+    # Palanca D: Order Book Imbalance / L2 Depth Analysis
+    enable_order_book_imbalance: bool = Field(default=True, description="Level 2 order book bid/ask depth imbalance analysis")
+    min_order_book_imbalance_ratio: float = Field(default=1.25, description="Minimum bid/ask depth ratio for bullish institutional absorption confirmation (1.25x)")
+    max_seller_overhang_ratio: float = Field(default=0.60, description="Maximum bid/ask ratio before triggering seller overhang size reduction (0.60x)")
+
 
 class BotConfig(BaseModel):
     """Global Bot Configuration."""

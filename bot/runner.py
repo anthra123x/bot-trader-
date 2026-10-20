@@ -28,8 +28,10 @@ from bot.models import (
 from bot.notifications.notifier import Notifier
 from bot.reasoning.agent_brain import AgentBrain
 from bot.reasoning.mcp_adapter import MCPTradingAdapter
+from bot.risk.order_book_analyzer import ORDER_BOOK_ANALYZER, OrderBookAnalyzer
 from bot.risk.quant_screener import QuantScreener, QuantScreenResult
 from bot.risk.risk_engine import RiskEngine
+from bot.scanner.hot_scanner import HOT_MOMENTUM_SCANNER, HotMomentumScanner
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,17 @@ class BotRunner:
         self.db = db or get_neon_repo()
         self.risk_engine = RiskEngine(self.config.risk)
         thresh = getattr(self.config.risk, "screener_conviction_threshold", 55.0)
-        self.quant_screener = QuantScreener(conviction_threshold=thresh)
+        enable_mtf = getattr(self.config.risk, "enable_mtf_confluence", True)
+        mtf_bonus = getattr(self.config.risk, "mtf_bonus_score", 20.0)
+        mtf_penalty = getattr(self.config.risk, "mtf_penalty_score", 25.0)
+        self.quant_screener = QuantScreener(
+            conviction_threshold=thresh,
+            enable_mtf_confluence=enable_mtf,
+            mtf_bonus_score=mtf_bonus,
+            mtf_penalty_score=mtf_penalty,
+        )
+        self.hot_scanner = HOT_MOMENTUM_SCANNER
+        self.order_book_analyzer = ORDER_BOOK_ANALYZER
         self.brain = AgentBrain(
             config=self.config,
             broker=self.broker,
@@ -80,8 +92,11 @@ class BotRunner:
     def identify_asset_class(self, symbol: str) -> AssetClass:
         """Categorize instrument into Equity or Crypto."""
         normalized = symbol.upper().strip()
+        from bot.symbols import is_crypto
         if (
-            "-USD" in normalized
+            is_crypto(normalized)
+            or "-USD" in normalized
+            or "/USD" in normalized
             or normalized in [s.upper() for s in self.config.watchlist_crypto]
             or normalized in ("BTC", "ETH", "SOL", "USDT")
         ):
@@ -244,6 +259,28 @@ class BotRunner:
 
         is_crypto = self.identify_asset_class(symbol) == AssetClass.CRYPTO
         asset_type = "crypto" if is_crypto else "stock"
+
+        # Palanca D: Order Book Level 2 Depth Analysis
+        ob_analysis = None
+        if getattr(self.config.risk, "enable_order_book_imbalance", True) and is_crypto:
+            try:
+                ob_analysis = self.order_book_analyzer.analyze(symbol, broker=self.broker)
+                screen_res.metrics["l2_imbalance_ratio"] = ob_analysis.imbalance_ratio
+                screen_res.metrics["l2_bias"] = ob_analysis.bias
+                screen_res.metrics["l2_details"] = ob_analysis.details
+                if ob_analysis.imbalance_ratio <= getattr(self.config.risk, "max_seller_overhang_ratio", 0.60) and screen_res.bias == "BUY":
+                    logger.info(
+                        "[ORDER_BOOK] 🧱 %s: Muro vendedor L2 detectado (Imbalance: %.2f; %s). Asignación ajustada defensivamente.",
+                        symbol, ob_analysis.imbalance_ratio, ob_analysis.details
+                    )
+                elif ob_analysis.imbalance_ratio >= getattr(self.config.risk, "min_order_book_imbalance_ratio", 1.25):
+                    logger.info(
+                        "[ORDER_BOOK] 🚀 %s: Absorción compradora L2 detectada (Imbalance: %.2f). Entrada confirmada con soporte institucional.",
+                        symbol, ob_analysis.imbalance_ratio
+                    )
+            except Exception as obe:
+                logger.debug("Notice en análisis de libro L2 para %s: %s", symbol, obe)
+
         # Build live EnhancedPortfolioContext so subagents reason with real account positions, cash, quant metrics & lessons
         portfolio_ctx = None
         try:
@@ -314,10 +351,12 @@ class BotRunner:
             # Gather Quantitative Screener Telemetry
             quant_text = (
                 f"- Quantitative Setup: {screen_res.setup_name} (Bias: {screen_res.bias}, Score: {screen_res.score:.0f}/100)\n"
-                f"- Technical Indicators: RSI(14)={screen_res.metrics.get('rsi')}, ATR%={screen_res.metrics.get('atr')}, Bollinger Bandwidth={screen_res.metrics.get('band_pct')}\n"
+                f"- Technical Indicators: RSI(14)={screen_res.metrics.get('rsi')}, ATR%={screen_res.metrics.get('atr_pct', screen_res.metrics.get('atr'))}%, MTF={screen_res.metrics.get('mtf_confluence', 'NEUTRAL')}\n"
                 f"- Mathematical Risk/Reward: {screen_res.risk_reward_ratio:.2f}:1 (Suggested SL: ${screen_res.suggested_stop_loss:.2f}, TP: ${screen_res.suggested_take_profit:.2f})\n"
                 f"- Screener Consensus Rationale: {screen_res.rationale}"
             )
+            if ob_analysis:
+                quant_text += f"\n- Order Book L2: Imbalance {ob_analysis.imbalance_ratio:.2f}x ({ob_analysis.bias}) - {ob_analysis.details}"
 
             # Gather Continuous Learning Lessons from Pattern Memory
             lessons_text = ""
@@ -764,12 +803,26 @@ class BotRunner:
         """Run analysis on all symbols in the watchlist (Equities + Crypto)."""
         date = trade_date or get_current_date()
         
+        # Palanca A: Dynamic Hot Momentum Pool Discovery
+        crypto_symbols = self.config.watchlist_crypto
+        if getattr(self.config.risk, "enable_dynamic_hot_scanner", True):
+            try:
+                top_n = getattr(self.config.risk, "hot_scanner_top_n", 12)
+                crypto_symbols = self.hot_scanner.discover_hot_universe(
+                    broker=self.broker,
+                    core_symbols=self.config.watchlist_crypto,
+                    top_n=top_n,
+                )
+            except Exception as hse:
+                logger.debug("Notice en hot scanner: %s; usando lista core.", hse)
+                crypto_symbols = self.config.watchlist_crypto
+
         # When equity market is closed overnight or weekends, prioritize active 24/7 liquid crypto
         equity_open = self.is_equity_market_open()
         if equity_open:
-            all_symbols = self.config.watchlist_equities + self.config.watchlist_crypto
+            all_symbols = self.config.watchlist_equities + crypto_symbols
         else:
-            all_symbols = self.config.watchlist_crypto
+            all_symbols = crypto_symbols
             
         executed_orders: list[Order] = []
 

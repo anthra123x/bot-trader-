@@ -46,12 +46,18 @@ class QuantScreener:
         atr_multiplier_sl: float = 1.2,
         atr_multiplier_tp: float = 2.4,
         conviction_threshold: float = 55.0,
+        enable_mtf_confluence: bool = True,
+        mtf_bonus_score: float = 20.0,
+        mtf_penalty_score: float = 25.0,
     ):
         self.rsi_oversold = rsi_oversold
         self.rsi_overbought = rsi_overbought
         self.atr_multiplier_sl = atr_multiplier_sl
         self.atr_multiplier_tp = atr_multiplier_tp
         self.conviction_threshold = conviction_threshold
+        self.enable_mtf_confluence = enable_mtf_confluence
+        self.mtf_bonus_score = mtf_bonus_score
+        self.mtf_penalty_score = mtf_penalty_score
         self._btc_macro_cache: tuple[float, dict[str, Any]] | None = None
 
     def get_btc_macro_health(self, as_of_date: str) -> dict[str, Any]:
@@ -165,6 +171,11 @@ class QuantScreener:
                 stock_df["rsi"].tolist()
             )
 
+            # Channel percentile: 0.0 = lower band, 1.0 = upper band
+            channel_width = boll_ub - boll_lb
+            band_pct = (close - boll_lb) / channel_width if channel_width > 0 else 0.5
+            atr_pct = round((atr / close) * 100.0, 2) if close > 0 else 0.0
+
             metrics = {
                 "close": close,
                 "rsi": rsi,
@@ -173,16 +184,15 @@ class QuantScreener:
                 "boll_ub": boll_ub,
                 "boll_mid": boll_mid,
                 "atr": atr,
+                "atr_pct": atr_pct,
+                "band_pct": round(band_pct, 4),
                 "ema10": ema10,
                 "sma50": sma50,
                 "sma200": sma200,
                 "rvol": rvol,
                 "divergence": div_type or "NONE",
+                "mtf_confluence": "NEUTRAL",
             }
-
-            # Channel percentile: 0.0 = lower band, 1.0 = upper band
-            channel_width = boll_ub - boll_lb
-            band_pct = (close - boll_lb) / channel_width if channel_width > 0 else 0.5
 
             bull_points = 0
             bear_points = 0
@@ -237,6 +247,32 @@ class QuantScreener:
             elif close < sma50:
                 bear_points += 15
                 bear_reasons.append("Precio bajo SMA-50 (resistencia bajista)")
+
+            # Palanca B: Multi-Timeframe Confluence (MTF) Alignment
+            if self.enable_mtf_confluence:
+                macro_bullish = (close > sma50 and (ema10 >= sma50 or macdh > 0))
+                macro_bearish = (close < sma50 and (ema10 <= sma50 or macdh < 0))
+                is_pullback_dip = (rsi <= 48.0 or band_pct <= 0.35 or div_type == "BULLISH")
+                is_bear_rally = (rsi >= 58.0 or band_pct >= 0.70 or div_type == "BEARISH")
+
+                if bull_points > bear_points:
+                    if macro_bullish and is_pullback_dip:
+                        bull_points += int(self.mtf_bonus_score)
+                        bull_reasons.append(f"Confluencia MTF Alcista: Pullback a soporte en macro alcista (+{int(self.mtf_bonus_score)} pts)")
+                        metrics["mtf_confluence"] = "BULLISH_CONFLUENCE"
+                    elif close < sma50 and close < sma200 and macdh < 0 and div_type != "BULLISH":
+                        bull_points = max(0, bull_points - int(self.mtf_penalty_score))
+                        bull_reasons.append(f"Aviso MTF: Intento contra tendencia macro bajista (-{int(self.mtf_penalty_score)} pts)")
+                        metrics["mtf_confluence"] = "BEARISH_DIVERGENT"
+                elif bear_points > bull_points:
+                    if macro_bearish and is_bear_rally:
+                        bear_points += int(self.mtf_bonus_score)
+                        bear_reasons.append(f"Confluencia MTF Bajista: Rebote a resistencia en macro bajista (+{int(self.mtf_bonus_score)} pts)")
+                        metrics["mtf_confluence"] = "BEARISH_CONFLUENCE"
+                    elif close > sma50 and close > sma200 and macdh > 0 and div_type != "BEARISH":
+                        bear_points = max(0, bear_points - int(self.mtf_penalty_score))
+                        bear_reasons.append(f"Aviso MTF: Venta contra tendencia macro alcista fuerte (-{int(self.mtf_penalty_score)} pts)")
+                        metrics["mtf_confluence"] = "BULLISH_DIVERGENT"
 
             # Palanca B: Macro SMA-200 Filter (Paul Tudor Jones Rule)
             if close < sma200 and div_type != "BULLISH":
