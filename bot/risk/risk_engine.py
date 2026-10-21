@@ -53,12 +53,13 @@ class RiskEngine:
         self._symbol_loss_streak: dict[str, int] = {}
         # Hydrate active positions and risk states from Neon DB / local cache
         self.hydrate_active_positions_state()
-        # Apply Bayesian optimized parameters if available
-        try:
-            from bot.learning.param_optimizer import PARAM_OPTIMIZER
-            PARAM_OPTIMIZER.apply_to_config(self.config)
-        except Exception as oe:
-            logger.debug("[PARAM_OPTIMIZER] Init notice: %s", oe)
+        # Apply Bayesian optimized parameters if available (skip during pytest to preserve test config)
+        if "PYTEST_CURRENT_TEST" not in os.environ:
+            try:
+                from bot.learning.param_optimizer import PARAM_OPTIMIZER
+                PARAM_OPTIMIZER.apply_to_config(self.config)
+            except Exception as oe:
+                logger.debug("[PARAM_OPTIMIZER] Init notice: %s", oe)
 
     def register_order_in_flight(self, symbol: str, quantity: float, price: float, asset_class: AssetClass) -> None:
         """Track newly submitted order in-flight to prevent duplicate rapid pyramiding."""
@@ -1151,13 +1152,21 @@ class RiskEngine:
 
         qty_by_alloc = remaining_alloc / current_price
 
-        # c) Available liquidity (Bounded by Cash Reserve Floor and Buying Power)
+        # c) Available liquidity (Bounded by Cash Reserve Floor, Buying Power, and Venue Cash in Hybrid mode)
         available_liquidity = available_cash_reserve
-        if signal.asset_class == AssetClass.EQUITY and balance.buying_power > 0:
-            available_liquidity = min(available_liquidity, balance.buying_power)
+        if signal.asset_class == AssetClass.EQUITY:
+            if balance.buying_power > 0:
+                available_liquidity = min(available_liquidity, balance.buying_power)
+            if balance.equity_cash is not None:
+                available_liquidity = min(available_liquidity, balance.equity_cash)
+        elif signal.asset_class == AssetClass.CRYPTO:
+            if balance.crypto_cash is not None:
+                available_liquidity = min(available_liquidity, balance.crypto_cash)
+
         # Apply 2% safety buffer for slippage & fees
         safe_liquidity = max(0.0, available_liquidity * 0.98)
         qty_by_cash = safe_liquidity / current_price
+
 
         # Palanca D: Order Book Imbalance / Level 2 Depth Adjustment
         l2_multiplier = 1.0

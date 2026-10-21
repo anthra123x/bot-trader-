@@ -203,10 +203,14 @@ class AdaptiveModel:
             except Exception as e:
                 logger.debug("[ADAPTIVE_MODEL] Error cargando modelo local: %s", e)
 
-        # 2. Try Neon system_config
+        # 2. Try Neon system_config (skip in pytest if custom test model_path was specified)
+        if "PYTEST_CURRENT_TEST" in os.environ and ("pytest" in self.model_path or "/tmp" in self.model_path):
+            return False
+
         try:
             from bot.database.neon_repo import get_neon_repo
             repo = get_neon_repo()
+
             if repo.is_connected:
                 raw_json = repo.get_system_config("ADAPTIVE_MODEL_STATE")
                 if raw_json:

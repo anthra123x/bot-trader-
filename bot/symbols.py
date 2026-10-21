@@ -39,3 +39,14 @@ def to_alpaca_symbol(symbol: str) -> str:
     if s.endswith("USD") and "/" not in s and len(s) > 3:
         return f"{s[:-3]}/USD"
     return s
+
+
+def to_binance_symbol(symbol: str) -> str:
+    """Convert standard symbol to Binance format (e.g. BTC-USD -> BTCUSDT, BTC/USD -> BTCUSDT)."""
+    s = symbol.upper().replace("/", "").replace("-", "").strip()
+    if s.endswith("USD") and not s.endswith("USDT") and not s.endswith("USDC"):
+        return f"{s[:-3]}USDT"
+    if not s.endswith("USDT") and not s.endswith("USDC") and not s.endswith("FDUSD"):
+        return f"{s}USDT"
+    return s
+
