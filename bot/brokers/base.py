@@ -38,3 +38,12 @@ class BaseBroker(ABC):
     def cancel_order(self, order_id: str) -> bool:
         """Cancel a pending order."""
         pass
+
+    def cancel_all_orders(self) -> bool:
+        """Cancel all pending orders."""
+        return True
+
+    def close_all_positions(self) -> list[Any]:
+        """Liquidate all open positions."""
+        return []
+

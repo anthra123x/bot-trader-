@@ -428,6 +428,43 @@ class AlpacaBroker(BaseBroker):
             except Exception:
                 return False
 
+    def cancel_all_orders(self) -> bool:
+        """Cancel all pending orders in Alpaca."""
+        with self._lock:
+            self._positions_cache = None
+            self._balance_cache = None
+        if self._has_direct_keys():
+            url = f"{self.base_url}/v2/orders"
+            resp = requests.delete(url, headers=self._headers(), timeout=10)
+            return resp.status_code in (200, 204, 207)
+        else:
+            try:
+                self._run_cli(["order", "cancel-all"])
+                return True
+            except Exception:
+                return False
+
+    def close_all_positions(self, cancel_orders: bool = True) -> list[dict[str, Any]]:
+        """Liquidate all open positions in Alpaca at market price."""
+        with self._lock:
+            self._positions_cache = None
+            self._balance_cache = None
+        if self._has_direct_keys():
+            url = f"{self.base_url}/v2/positions"
+            params = {"cancel_orders": str(cancel_orders).lower()}
+            resp = requests.delete(url, headers=self._headers(), params=params, timeout=15)
+            if resp.status_code in (200, 207):
+                return resp.json() if resp.text else []
+            return []
+        else:
+            try:
+                res = self._run_cli(["position", "close-all"])
+                return [res] if isinstance(res, dict) else (res if isinstance(res, list) else [])
+            except Exception as e:
+                logger.warning("CLI close-all positions fallback notice: %s", e)
+                return []
+
+
     def get_orders(self, status: str = "all", limit: int = 50) -> list[Order]:
         """Fetch historical and pending orders from Alpaca."""
         if self._has_direct_keys():

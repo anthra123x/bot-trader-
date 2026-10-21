@@ -275,3 +275,29 @@ class PaperBroker(BaseBroker):
             cur = conn.execute("UPDATE orders SET status = 'CANCELLED' WHERE order_id = ? AND status = 'PENDING'", (order_id,))
             conn.commit()
             return cur.rowcount > 0
+
+    def cancel_all_orders(self) -> bool:
+        """Cancel all pending orders in paper broker."""
+        with self._get_connection() as conn:
+            cur = conn.execute("UPDATE orders SET status = 'CANCELLED' WHERE status = 'PENDING'")
+            conn.commit()
+            return cur.rowcount > 0
+
+    def close_all_positions(self) -> list[Order]:
+        """Liquidate all open positions in paper broker at market price."""
+        positions = self.get_positions(fetch_live_price=True)
+        closed_orders: list[Order] = []
+        for pos in positions:
+            sell_order = Order(
+                order_id=str(uuid.uuid4())[:8],
+                symbol=pos.symbol,
+                asset_class=pos.asset_class,
+                side=OrderSide.SELL,
+                order_type=OrderType.MARKET,
+                quantity=pos.quantity,
+                status=OrderStatus.PENDING,
+            )
+            executed = self.submit_order(sell_order)
+            closed_orders.append(executed)
+        return closed_orders
+

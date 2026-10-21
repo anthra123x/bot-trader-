@@ -85,5 +85,63 @@ def balance(
         console.print("[dim]No hay posiciones abiertas actualmente.[/dim]")
 
 
+@app.command()
+def reset(
+    broker: str = typer.Option(BOT_CONFIG.broker_type, "--broker", "-b", help="Broker to reset: 'paper' or 'alpaca'"),
+    reset_cloud: bool = typer.Option(True, "--reset-cloud/--no-reset-cloud", help="Reset Neon cloud tables after backup"),
+):
+    """Liquidate open positions, cancel all orders, and reset state for clean neural start."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+    import shutil
+
+    console.print(f"[bold red]Iniciando reinicio completo del sistema ({broker.upper()})...[/bold red]")
+    b = get_broker(broker)
+
+    # 1. Cancel all pending orders
+    console.print("[cyan]1. Cancelando órdenes pendientes...[/cyan]")
+    b.cancel_all_orders()
+
+    # 2. Close all open positions
+    console.print("[cyan]2. Liquidando todas las posiciones abiertas a precio de mercado...[/cyan]")
+    closed = b.close_all_positions()
+    console.print(f"[green]Posiciones liquidadas: {len(closed)}[/green]")
+
+    # 3. Reset local runtime state with backup
+    console.print("[cyan]3. Respaldando y limpiando estado local (data/)...[/cyan]")
+    data_dir = Path("data")
+    if data_dir.exists():
+        backup_dir = Path("data_backups") / datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        for item in data_dir.iterdir():
+            if item.is_file():
+                shutil.copy2(item, backup_dir / item.name)
+        # Clear transient state files
+        for fname in ["active_positions_state.json", "adaptive_model.lgb", "adaptive_model_meta.json"]:
+            f = data_dir / fname
+            if f.exists():
+                f.unlink()
+        console.print(f"[green]Respaldo local guardado en {backup_dir}[/green]")
+
+    # 4. Reset Neon Cloud DB if enabled
+    if reset_cloud:
+        console.print("[cyan]4. Limpiando historial previo en Neon PostgreSQL...[/cyan]")
+        try:
+            from bot.database.neon_repo import get_neon_repo
+            neon_repo = get_neon_repo()
+            if neon_repo and neon_repo.database_url:
+                with neon_repo.get_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("TRUNCATE TABLE orders, agent_debates, learned_patterns, equity_snapshots CASCADE;")
+                console.print("[green]Tablas de Neon PostgreSQL limpiadas con éxito.[/green]")
+        except Exception as ne:
+            console.print(f"[yellow]Aviso Neon: {ne}[/yellow]")
+
+    # 5. Show fresh balance
+    acc = b.get_account_balance()
+    console.print(f"[bold green]✨ Reinicio completado. Cash disponible: ${acc.cash:,.2f} {acc.currency}. Listo para operar limpio.[/bold green]")
+
+
 if __name__ == "__main__":
     app()
+
