@@ -508,13 +508,15 @@ class PatternMemory:
         try:
             with self._get_connection() as conn:
                 rows = conn.execute("""
-                    SELECT trade_id, symbol, outcome, pnl_pct, reward_score,
-                           rsi_entry, ema_ratio, volatility_atr_pct, market_regime,
-                           mae_pct, mfe_pct, exit_reason, duration_hours, features_json,
-                           created_at
-                    FROM trade_patterns
-                    ORDER BY created_at ASC
-                    LIMIT ?
+                    SELECT * FROM (
+                        SELECT trade_id, symbol, outcome, pnl_pct, reward_score,
+                               rsi_entry, ema_ratio, volatility_atr_pct, market_regime,
+                               mae_pct, mfe_pct, exit_reason, duration_hours, features_json,
+                               created_at
+                        FROM trade_patterns
+                        ORDER BY created_at DESC
+                        LIMIT ?
+                    ) ORDER BY created_at ASC
                 """, (limit,)).fetchall()
                 for r in rows:
                     rec = dict(r)

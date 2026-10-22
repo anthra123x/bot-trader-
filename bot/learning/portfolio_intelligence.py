@@ -120,7 +120,9 @@ class PortfolioIntelligence:
         # 5. Asset breakdown & Dynamic allocation weights
         asset_map: dict[str, list[float]] = {}
         for r in recent:
-            sym = str(r.get("symbol", "UNKNOWN"))
+            sym = str(r.get("symbol", "UNKNOWN")).replace("/", "-").strip().upper()
+            if sym.endswith("USD") and "-" not in sym and len(sym) > 3:
+                sym = f"{sym[:-3]}-USD"
             asset_map.setdefault(sym, []).append(float(r.get("pnl_pct", 0.0)))
 
         breakdown: dict[str, AssetPerformance] = {}
