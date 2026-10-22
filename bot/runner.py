@@ -669,6 +669,11 @@ class BotRunner:
             if p.quantity <= 0:
                 continue
 
+            # Skip negligible residual dust (< $1.00 notional) that cannot be traded on Alpaca
+            pos_val = p.quantity * (p.current_price or p.entry_price or 1.0)
+            if pos_val < 1.0:
+                continue
+
             # Ensure position entry time is tracked for opportunity cost time-stop evaluation
             norm_sym = normalize_symbol(p.symbol)
             if hasattr(self.risk_engine, "_position_entry_times") and norm_sym not in self.risk_engine._position_entry_times:
@@ -825,6 +830,15 @@ class BotRunner:
                 default_sl = p.entry_price * (1.0 - (sl_pct / 100.0))
                 current_sl = p.stop_loss_price or default_sl
                 target_tp = p.entry_price * (1.0 + (sl_pct * self.config.risk.min_risk_reward_ratio / 100.0))
+
+            # Defensive guard: An initial unratcheted stop loss cannot be at or above entry price
+            if current_sl >= p.entry_price:
+                default_sl_pct = (
+                    self.risk_engine.get_default_stop_loss_pct(p.symbol)
+                    if hasattr(self.risk_engine, "get_default_stop_loss_pct")
+                    else self.config.risk.default_stop_loss_pct
+                )
+                current_sl = round(p.entry_price * (1.0 - (default_sl_pct / 100.0)), 4)
 
             p.take_profit_price = target_tp
 

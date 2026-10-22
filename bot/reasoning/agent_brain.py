@@ -507,9 +507,24 @@ class AgentBrain:
 
         # 1. Institutional Pre-Flight Guard Check (Hummingbot & Freqtrade)
         action = OrderSide.BUY if ledger.decision.action == "BUY" else OrderSide.SELL
-        entry_price = ledger.decision.entry_price
-        sl_price = ledger.decision.suggested_stop_loss
-        tp_price = ledger.decision.suggested_take_profit
+
+        # Real-time broker price check to prevent cross-feed pricing discrepancy
+        try:
+            broker_p = self.broker.get_current_price(symbol)
+        except Exception:
+            broker_p = 0.0
+        entry_price = broker_p if broker_p > 0 else ledger.decision.entry_price
+
+        # Recalibrate SL and TP relative to real-time broker entry_price
+        raw_entry = ledger.decision.entry_price
+        if raw_entry > 0 and entry_price > 0 and raw_entry != entry_price and ledger.decision.suggested_stop_loss:
+            sl_ratio = (raw_entry - ledger.decision.suggested_stop_loss) / raw_entry
+            tp_ratio = (ledger.decision.suggested_take_profit - raw_entry) / raw_entry if ledger.decision.suggested_take_profit else 0.065
+            sl_price = round(entry_price * (1.0 - sl_ratio), 4)
+            tp_price = round(entry_price * (1.0 + tp_ratio), 4) if ledger.decision.suggested_take_profit else None
+        else:
+            sl_price = ledger.decision.suggested_stop_loss
+            tp_price = ledger.decision.suggested_take_profit
 
         preflight = self.institutional_guard.evaluate_preflight(
             symbol=symbol,
@@ -611,6 +626,20 @@ class AgentBrain:
         executed_order = self.broker.submit_order(order)
         self.institutional_guard.transition_order_state(order.order_id, OrderState.SUBMITTED)
 
+        # Recalibrate persistent position targets directly from actual broker fill price
+        actual_fill_price = (
+            executed_order.filled_price
+            if (executed_order and executed_order.filled_price and executed_order.filled_price > 0)
+            else entry_price
+        )
+        if actual_fill_price > 0 and action == OrderSide.BUY:
+            sl_pct = (entry_price - risk_result.stop_loss_price) / entry_price if entry_price > 0 else 0.025
+            tp_pct = (risk_result.take_profit_price - entry_price) / entry_price if (risk_result.take_profit_price and entry_price > 0) else 0.065
+            calibrated_sl = round(actual_fill_price * (1.0 - sl_pct), 4)
+            calibrated_tp = round(actual_fill_price * (1.0 + tp_pct), 4) if risk_result.take_profit_price else None
+            if hasattr(self.risk_engine, "register_position_targets"):
+                self.risk_engine.register_position_targets(symbol, actual_fill_price, calibrated_sl, calibrated_tp)
+
         if action == OrderSide.BUY:
             if hasattr(self.risk_engine, "register_entry_context"):
                 self.risk_engine.register_entry_context(symbol, {
@@ -618,11 +647,11 @@ class AgentBrain:
                     "evidence_id": ledger.ledger_id,
                 })
             if hasattr(self.risk_engine, "register_order_in_flight"):
-                self.risk_engine.register_order_in_flight(symbol, risk_result.adjusted_quantity, ledger.decision.entry_price, asset_class)
+                self.risk_engine.register_order_in_flight(symbol, risk_result.adjusted_quantity, actual_fill_price, asset_class)
 
         logger.info(
-            "[AGENT_BRAIN] 🚀 ¡Orden ejecutada en broker para %s! %s %.4f u @ $%.2f (Ledger: %s)",
-            symbol, action.value, risk_result.adjusted_quantity, ledger.decision.entry_price, ledger.ledger_id
+            "[AGENT_BRAIN] 🚀 ¡Orden ejecutada en broker para %s! %s %.4f u @ $%.2f (Fill: $%.2f, Ledger: %s)",
+            symbol, action.value, risk_result.adjusted_quantity, entry_price, actual_fill_price, ledger.ledger_id
         )
 
         self._record_audit_in_db(ledger, order=executed_order)
