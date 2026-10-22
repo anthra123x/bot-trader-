@@ -39,8 +39,7 @@ class AccountBalance(BaseModel):
     equity: float
     buying_power: float
     initial_day_equity: float = 0.0
-    equity_cash: float | None = None
-    crypto_cash: float | None = None
+
 
     @property
     def daily_pnl(self) -> float:

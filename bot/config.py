@@ -177,13 +177,9 @@ class BotConfig(BaseModel):
     telegram_chat_id: str | None = Field(default=os.getenv("TELEGRAM_CHAT_ID"))
     discord_webhook_url: str | None = Field(default=os.getenv("DISCORD_WEBHOOK_URL"))
     
-    # Broker selection: 'paper', 'alpaca', 'binance', 'hybrid'
+    # Broker selection: 'paper', 'alpaca'
     broker_type: str = Field(default=os.getenv("BOT_BROKER_TYPE", "paper"))
-    
-    # Binance credentials
-    binance_api_key: str = Field(default=os.getenv("BINANCE_API_KEY", ""))
-    binance_secret_key: str = Field(default=os.getenv("BINANCE_SECRET_KEY", ""))
-    binance_testnet: bool = Field(default=os.getenv("BINANCE_TESTNET", "true").lower() in ("true", "1"))
+
     
     # TradingAgents base config override
     tradingagents_config: dict = Field(default_factory=lambda: DEFAULT_CONFIG.copy())

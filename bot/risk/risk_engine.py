@@ -1152,20 +1152,14 @@ class RiskEngine:
 
         qty_by_alloc = remaining_alloc / current_price
 
-        # c) Available liquidity (Bounded by Cash Reserve Floor, Buying Power, and Venue Cash in Hybrid mode)
+        # c) Available liquidity (Bounded by Cash Reserve Floor and Buying Power)
         available_liquidity = available_cash_reserve
-        if signal.asset_class == AssetClass.EQUITY:
-            if balance.buying_power > 0:
-                available_liquidity = min(available_liquidity, balance.buying_power)
-            if balance.equity_cash is not None:
-                available_liquidity = min(available_liquidity, balance.equity_cash)
-        elif signal.asset_class == AssetClass.CRYPTO:
-            if balance.crypto_cash is not None:
-                available_liquidity = min(available_liquidity, balance.crypto_cash)
-
+        if signal.asset_class == AssetClass.EQUITY and balance.buying_power > 0:
+            available_liquidity = min(available_liquidity, balance.buying_power)
         # Apply 2% safety buffer for slippage & fees
         safe_liquidity = max(0.0, available_liquidity * 0.98)
         qty_by_cash = safe_liquidity / current_price
+
 
 
         # Palanca D: Order Book Imbalance / Level 2 Depth Adjustment
