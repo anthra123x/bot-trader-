@@ -136,13 +136,21 @@ class PortfolioIntelligence:
             s_std = float(np.std(ret_list)) if len(ret_list) > 1 else 1.0
             s_sharpe = round(s_mean / max(s_std, 0.001) * math.sqrt(len(ret_list)), 2)
 
-            # Dynamic allocation multiplier: [0.5, 1.35]
-            if s_exp > 0.5 and s_sharpe > 0.5:
-                alloc_mult = 1.25  # High edge: boost position size
-            elif s_exp > 1.0 and s_sharpe > 1.0:
-                alloc_mult = 1.35  # Alpha powerhouse
+            # Dynamic allocation multiplier based on historical Sharpe and expectancy:
+            # High-Sharpe alpha assets (e.g. ETH with consistent positive returns) get 1.60x - 2.00x (2x-3x vs bleeding assets)
+            # Bleeding or negative Sharpe assets (e.g. LINK/DOGE/LTC) get 0.50x
+            if s_sharpe >= 1.5 and s_exp >= 0.7:
+                alloc_mult = 2.00  # Alpha powerhouse (e.g. ETH): 2-3x capital allocation
+            elif s_sharpe >= 1.0 and s_exp >= 0.5:
+                alloc_mult = 1.60  # Strong positive edge
+            elif s_sharpe >= 0.5 and s_exp > 0.3:
+                alloc_mult = 1.35  # High edge: boost position size
+            elif s_sharpe >= 0.3 and s_exp > 0.0:
+                alloc_mult = 1.25  # Favorable baseline
             elif s_exp < -0.3 or s_sharpe < -0.5:
                 alloc_mult = 0.50  # Bleeding asset: cut size in half
+            elif s_sharpe < 0.0 or s_exp < 0.0:
+                alloc_mult = 0.70  # Sub-par performer: defensive reduction
             else:
                 alloc_mult = 1.00  # Baseline
 
@@ -199,13 +207,18 @@ class PortfolioIntelligence:
         return report
 
     def get_symbol_allocation_multiplier(self, symbol: str) -> float:
-        """Return dynamic sizing multiplier [0.5, 1.35] for an asset based on historical track record."""
+        """Return dynamic sizing multiplier [0.5, 2.0] for an asset based on historical track record."""
         if not self._cached_report or not self._cached_report.asset_breakdown:
             return 1.0
         perf = self._cached_report.asset_breakdown.get(symbol)
-        if not perf:
-            return 1.0
-        return perf.allocation_multiplier
+        if perf:
+            return perf.allocation_multiplier
+        # Normalized symbol match fallback (e.g. ETH-USD vs ETHUSD)
+        norm = symbol.replace("-", "").replace("/", "").strip().upper()
+        for k, v in self._cached_report.asset_breakdown.items():
+            if k.replace("-", "").replace("/", "").strip().upper() == norm:
+                return v.allocation_multiplier
+        return 1.0
 
     def get_allocation_multiplier(self, symbol: str) -> float:
         """Alias for get_symbol_allocation_multiplier."""

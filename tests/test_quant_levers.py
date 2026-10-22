@@ -415,51 +415,54 @@ class TestPrecisionAgainstRandomness:
         assert trap_flow < -0.15
 
     def test_meta_labeling_quality_gate(self):
+        from unittest.mock import patch
         config = BotRiskConfig(
             enable_meta_labeling=True,
             min_meta_probability=0.62,
         )
         engine = RiskEngine(config=config)
 
-        # High-conviction setup (Persistent trend H=0.58, L2=1.30, Bullish CVD)
-        good_signal = TradeSignal(
-            symbol="BTC-USD",
-            asset_class=AssetClass.CRYPTO,
-            trade_date="2026-10-18",
-            rating="BUY",
-            action=OrderSide.BUY,
-            confidence=0.85,
-            current_price=100.0,
-            metrics={
-                "hurst_exponent": 0.58,
-                "volume_delta_flow": 0.35,
-                "l2_imbalance_ratio": 1.30,
-            },
-        )
-        is_ok, p_success, reason = engine.evaluate_meta_labeling(good_signal, market_regime="TRENDING_BULL_STABLE")
-        assert is_ok is True
-        assert p_success >= 0.62
+        # Force heuristic fallback so test is deterministic regardless of persisted LightGBM model
+        with patch("bot.learning.adaptive_model.ADAPTIVE_MODEL._is_trained", False):
+            # High-conviction setup (Persistent trend H=0.58, L2=1.30, Bullish CVD)
+            good_signal = TradeSignal(
+                symbol="BTC-USD",
+                asset_class=AssetClass.CRYPTO,
+                trade_date="2026-10-18",
+                rating="BUY",
+                action=OrderSide.BUY,
+                confidence=0.85,
+                current_price=100.0,
+                metrics={
+                    "hurst_exponent": 0.58,
+                    "volume_delta_flow": 0.35,
+                    "l2_imbalance_ratio": 1.30,
+                },
+            )
+            is_ok, p_success, reason = engine.evaluate_meta_labeling(good_signal, market_regime="TRENDING_BULL_STABLE")
+            assert is_ok is True
+            assert p_success >= 0.62
 
-        # Low-probability setup trapped in random walk noise (H=0.46, seller overhang L2=0.55, negative CVD)
-        noisy_signal = TradeSignal(
-            symbol="DOGE-USD",
-            asset_class=AssetClass.CRYPTO,
-            trade_date="2026-10-18",
-            rating="BUY",
-            action=OrderSide.BUY,
-            confidence=0.55,
-            current_price=0.08,
-            metrics={
-                "hurst_exponent": 0.46,
-                "volume_delta_flow": -0.25,
-                "is_cvd_divergent": 1.0,
-                "l2_imbalance_ratio": 0.55,
-            },
-        )
-        is_ok, p_success, reason = engine.evaluate_meta_labeling(noisy_signal, market_regime="CHOPPY_RANGE_BOUND")
-        assert is_ok is False
-        assert p_success < 0.62
-        assert "Meta-Labeling" in reason
+            # Low-probability setup trapped in random walk noise (H=0.46, seller overhang L2=0.55, negative CVD)
+            noisy_signal = TradeSignal(
+                symbol="DOGE-USD",
+                asset_class=AssetClass.CRYPTO,
+                trade_date="2026-10-18",
+                rating="BUY",
+                action=OrderSide.BUY,
+                confidence=0.55,
+                current_price=0.08,
+                metrics={
+                    "hurst_exponent": 0.46,
+                    "volume_delta_flow": -0.25,
+                    "is_cvd_divergent": 1.0,
+                    "l2_imbalance_ratio": 0.55,
+                },
+            )
+            is_ok, p_success, reason = engine.evaluate_meta_labeling(noisy_signal, market_regime="CHOPPY_RANGE_BOUND")
+            assert is_ok is False
+            assert p_success < 0.62
+            assert "Meta-Labeling" in reason
 
     def test_extended_quarantine_on_consecutive_losses(self):
         config = BotRiskConfig(

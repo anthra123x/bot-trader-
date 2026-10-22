@@ -8,7 +8,7 @@ import numpy as np
 from bot.config import BotRiskConfig
 from bot.learning.pattern_memory import PatternMemory
 from bot.models import AccountBalance, AssetClass, OrderSide, Position, RiskValidationResult, TradeSignal
-from bot.symbols import is_crypto
+from bot.symbols import is_altcoin, is_crypto
 
 logger = logging.getLogger(__name__)
 
@@ -240,11 +240,26 @@ class RiskEngine:
         norm_sym = normalize_symbol(symbol)
         return self.entry_contexts.get(norm_sym) or self.entry_contexts.get(symbol) or {}
 
+    def get_default_stop_loss_pct(self, symbol: str) -> float:
+        """Return symbol-specific default stop loss percentage.
+        
+        Tightened to 1.5% for altcoins (LINK, LTC, DOGE, etc.) vs 2.5% for majors/equities.
+        """
+        if is_altcoin(symbol):
+            return getattr(self.config, "altcoin_default_stop_loss_pct", 1.5)
+        return self.config.default_stop_loss_pct
+
+    def get_max_stop_loss_pct(self, symbol: str) -> float:
+        """Return maximum allowable stop loss percentage for the symbol."""
+        if is_altcoin(symbol):
+            return getattr(self.config, "altcoin_max_stop_loss_pct", 2.5)
+        return self.config.max_stop_loss_pct
+
     def register_position_targets(self, symbol: str, entry_price: float, stop_loss: float, take_profit: float | None) -> None:
         """Register active target take-profit and stop-loss levels for a position."""
         norm_sym = normalize_symbol(symbol)
         if take_profit is None:
-            default_sl_dist = entry_price * (self.config.default_stop_loss_pct / 100.0)
+            default_sl_dist = entry_price * (self.get_default_stop_loss_pct(symbol) / 100.0)
             take_profit = round(entry_price + (default_sl_dist * self.config.min_risk_reward_ratio), 4)
         self._position_targets[norm_sym] = {
             "entry_price": entry_price,
@@ -261,7 +276,7 @@ class RiskEngine:
             return targets
 
         # Fallback calculation for preexisting positions or after process reboot
-        default_sl_distance = entry_price * (self.config.default_stop_loss_pct / 100.0)
+        default_sl_distance = entry_price * (self.get_default_stop_loss_pct(symbol) / 100.0)
         fallback_sl = round(entry_price - default_sl_distance, 4)
         min_reward = default_sl_distance * self.config.min_risk_reward_ratio
         fallback_tp = round(entry_price + min_reward, 4)
@@ -460,6 +475,21 @@ class RiskEngine:
             return False, ""
 
         elapsed_hours = (now - entry_ts) / 3600.0
+
+        # 1. Aggressive Time-Stop for Altcoins (LINK, LTC, DOGE, etc.)
+        # Non-major cryptos that fail to gain >+0.5% within 4 hours are evacuated to cut slow bleeders
+        if is_altcoin(symbol) and getattr(self.config, "enable_altcoin_aggressive_time_stop", True):
+            alt_hours = getattr(self.config, "altcoin_time_stop_hours", 4.0)
+            alt_min_profit = getattr(self.config, "altcoin_time_stop_min_profit_pct", 0.5)
+            unrealized_pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
+            if elapsed_hours >= alt_hours and unrealized_pnl_pct <= alt_min_profit:
+                reason = (
+                    f"Capital Rotation Time-Stop: Altcoin {symbol} no superó el +{alt_min_profit:.1f}% "
+                    f"en {elapsed_hours:.1f}h (PnL: {unrealized_pnl_pct:+.2f}%). "
+                    f"Evacuando posición lenta para rotar liquidez hacia líderes de momentum."
+                )
+                return True, reason
+
         max_hours = getattr(self.config, "max_crypto_stagnant_hours", 4.0)
 
         if elapsed_hours < max_hours:
@@ -998,6 +1028,25 @@ class RiskEngine:
             else:
                 warnings.append(f"[META_LABELING] 🎯 Filtro de Precisión superado: {meta_reason}")
 
+        # 8c. Filtro de Calidad de Activo por Win Rate Histórico (Pattern Memory Quality Gate)
+        if signal.action == OrderSide.BUY and getattr(self.config, "enable_asset_win_rate_filter", True) and self.pattern_memory:
+            lookback = getattr(self.config, "asset_win_rate_lookback", 10)
+            min_trades = getattr(self.config, "min_asset_history_trades", 2)
+            min_winrate = getattr(self.config, "min_asset_win_rate_pct", 40.0)
+            track_rec = self.pattern_memory.get_asset_track_record(
+                symbol=signal.symbol,
+                lookback=lookback,
+                min_trades=min_trades,
+                min_win_rate_pct=min_winrate,
+            )
+            if track_rec.get("is_disqualified"):
+                rejection_reasons.append(
+                    f"[ASSET_QUALITY_FILTER] ❌ Activo {signal.symbol} excluido por bajo Win Rate histórico: "
+                    f"{track_rec.get('win_rate_pct'):.1f}% en últimas {track_rec.get('trade_count')} operaciones "
+                    f"(< {min_winrate:.0f}% requerido). Protegiendo capital de activos ruidosos."
+                )
+                return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons, risk_warnings=warnings)
+
         # 9. Pattern Learning & Mistake Veto (ML4T Continuous Feedback)
         pattern_multiplier = 1.0
         if signal.action == OrderSide.BUY and self.pattern_memory:
@@ -1057,24 +1106,26 @@ class RiskEngine:
             return RiskValidationResult(is_approved=False, rejection_reasons=rejection_reasons)
 
         stop_loss = signal.stop_loss
-        default_sl_distance = current_price * (self.config.default_stop_loss_pct / 100.0)
+        effective_default_sl_pct = self.get_default_stop_loss_pct(signal.symbol)
+        default_sl_distance = current_price * (effective_default_sl_pct / 100.0)
         
         if stop_loss is None or stop_loss >= current_price or stop_loss <= 0:
             stop_loss = current_price - default_sl_distance
             warnings.append(
                 f"LLM stop loss missing or invalid ({signal.stop_loss}). "
-                f"Applied default {self.config.default_stop_loss_pct}% stop: ${stop_loss:,.2f}"
+                f"Applied default {effective_default_sl_pct}% stop: ${stop_loss:,.2f}"
             )
 
         risk_per_share = current_price - stop_loss
         risk_pct = (risk_per_share / current_price) * 100.0
 
-        if risk_pct > self.config.max_stop_loss_pct:
-            stop_loss = current_price * (1 - self.config.max_stop_loss_pct / 100.0)
+        effective_max_sl_pct = self.get_max_stop_loss_pct(signal.symbol)
+        if risk_pct > effective_max_sl_pct:
+            stop_loss = current_price * (1 - effective_max_sl_pct / 100.0)
             risk_per_share = current_price - stop_loss
             warnings.append(
                 f"Requested stop loss too wide ({risk_pct:.1f}%). "
-                f"Clamped to max allowable {self.config.max_stop_loss_pct}%: ${stop_loss:,.2f}"
+                f"Clamped to max allowable {effective_max_sl_pct}%: ${stop_loss:,.2f}"
             )
 
         # 5. Position Sizing
@@ -1292,4 +1343,8 @@ class RiskEngine:
             take_profit_price=final_tp,
             risk_warnings=warnings,
         )
+
+    # Alias for API consistency
+    validate_trade = evaluate
+
 

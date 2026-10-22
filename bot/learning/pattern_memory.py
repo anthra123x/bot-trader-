@@ -530,3 +530,116 @@ class PatternMemory:
             logger.debug("Failed to fetch historical feature matrix: %s", e)
         return records
 
+    def get_asset_track_record(
+        self,
+        symbol: str,
+        lookback: int = 10,
+        min_trades: int = 2,
+        min_win_rate_pct: float = 40.0,
+    ) -> dict[str, Any]:
+        """Query rolling performance for a specific asset over recent closed trades.
+        
+        Calculates win rate, trade count, and whether asset qualifies or fails quality gate (<40% win rate).
+        """
+        norm_sym = symbol.replace("-", "").replace("/", "").strip().upper()
+        records: list[dict[str, Any]] = []
+        try:
+            with self._get_connection() as conn:
+                rows = conn.execute("""
+                    SELECT outcome, pnl_pct, symbol
+                    FROM trade_patterns
+                    ORDER BY created_at DESC
+                """).fetchall()
+                for r in rows:
+                    row_sym = str(r["symbol"]).replace("-", "").replace("/", "").strip().upper()
+                    if row_sym == norm_sym:
+                        records.append({
+                            "outcome": str(r["outcome"]).upper(),
+                            "pnl_pct": float(r["pnl_pct"]),
+                        })
+                        if len(records) >= lookback:
+                            break
+        except Exception as e:
+            logger.debug("Failed to query asset track record for %s: %s", symbol, e)
+
+        # Fallback to Neon if SQLite has insufficient records and not in tests
+        if len(records) < min_trades and not os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                from bot.database.neon_repo import get_neon_repo
+                repo = get_neon_repo()
+                if repo and repo.is_connected:
+                    neon_rows = repo.get_learned_patterns(limit=50)
+                    for nr in neon_rows:
+                        nr_sym = str(nr.get("symbol", "")).replace("-", "").replace("/", "").strip().upper()
+                        if nr_sym == norm_sym:
+                            metrics = nr.get("metrics") or {}
+                            records.append({
+                                "outcome": str(nr.get("outcome", "")).upper(),
+                                "pnl_pct": float(metrics.get("pnl_pct", 0.0)),
+                            })
+                            if len(records) >= lookback:
+                                break
+            except Exception as ne:
+                logger.debug("Notice querying Neon for asset track record: %s", ne)
+
+        trade_count = len(records)
+        if trade_count == 0:
+            return {
+                "symbol": symbol,
+                "trade_count": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate_pct": 50.0,
+                "avg_pnl_pct": 0.0,
+                "is_disqualified": False,
+                "reason": "Sin historial previo.",
+            }
+
+        wins = sum(1 for r in records if r["outcome"] == "WIN" or r["pnl_pct"] > 0)
+        losses = trade_count - wins
+        win_rate = (wins / trade_count) * 100.0
+        avg_pnl = sum(r["pnl_pct"] for r in records) / trade_count
+
+        is_disqualified = (trade_count >= min_trades) and (win_rate < min_win_rate_pct)
+        reason = (
+            f"Bajo Win Rate histórico ({win_rate:.1f}% en últimas {trade_count} operaciones < {min_win_rate_pct:.0f}%). Excluido de nuevas compras."
+            if is_disqualified else
+            f"Win Rate aceptable ({win_rate:.1f}% en {trade_count} operaciones)."
+        )
+
+        return {
+            "symbol": symbol,
+            "trade_count": trade_count,
+            "wins": wins,
+            "losses": losses,
+            "win_rate_pct": round(win_rate, 1),
+            "avg_pnl_pct": round(avg_pnl, 2),
+            "is_disqualified": is_disqualified,
+            "reason": reason,
+        }
+
+    def evaluate_asset_quality(
+        self,
+        symbol: str,
+        lookback: int = 10,
+        min_trades: int = 2,
+        min_win_rate_pct: float = 40.0,
+    ) -> PatternCheckResult:
+        """Evaluate whether an asset qualifies under historical win-rate filtering."""
+        track = self.get_asset_track_record(
+            symbol=symbol,
+            lookback=lookback,
+            min_trades=min_trades,
+            min_win_rate_pct=min_win_rate_pct,
+        )
+        if track.get("is_disqualified"):
+            return PatternCheckResult(
+                is_safe=False,
+                risk_multiplier=0.0,
+                matched_mistake_tag="LOW_HISTORICAL_WIN_RATE",
+                similarity_score=100.0,
+                warning_message=f"Activo {symbol} vetado: Win Rate {track['win_rate_pct']:.1f}% < {min_win_rate_pct:.0f}% en últimas {track['trade_count']} operaciones.",
+                learned_lesson=f"Excluir activos con bajo desempeño ({symbol}) para enfocar capital en líderes consistentes.",
+            )
+        return PatternCheckResult(is_safe=True, risk_multiplier=1.0)
+

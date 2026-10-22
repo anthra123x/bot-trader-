@@ -19,6 +19,8 @@ class BotRiskConfig(BaseModel):
     max_daily_drawdown_pct: float = Field(default=3.0, description="Kill switch threshold for daily loss (3%)")
     default_stop_loss_pct: float = Field(default=2.5, description="Fallback stop loss if LLM provides none (2.5%)")
     max_stop_loss_pct: float = Field(default=4.0, description="Maximum allowable stop loss distance (4.0%)")
+    altcoin_default_stop_loss_pct: float = Field(default=1.5, description="Tightened fallback stop loss % for altcoins (1.5%)")
+    altcoin_max_stop_loss_pct: float = Field(default=2.5, description="Tightened max allowable stop loss % for altcoins (2.5%)")
     min_risk_reward_ratio: float = Field(default=2.5, description="Min reward/risk ratio (strictly >= 2.5:1 for positive mathematical expectancy)")
     max_overbought_rsi_buy: float = Field(default=64.0, description="Max RSI allowable for BUY entry (anti-bull-trap ceiling)")
     enable_macro_sma200_filter: bool = Field(default=True, description="Enforce macro 200 SMA trend filter for long positions")
@@ -115,6 +117,9 @@ class BotRiskConfig(BaseModel):
     enable_time_stop_rotation: bool = Field(default=True, description="Enable time-based exit for stagnant crypto positions to rotate capital into hot momentum runners")
     max_crypto_stagnant_hours: float = Field(default=4.0, description="Max holding hours for crypto position in narrow stagnation range (4.0 hours)")
     stagnant_range_pct: float = Field(default=1.2, description="Max absolute profit/loss % boundary to consider a position stagnant (+/- 1.2%)")
+    enable_altcoin_aggressive_time_stop: bool = Field(default=True, description="Enable aggressive 4h time-stop for altcoins that fail to gain >0.5%")
+    altcoin_time_stop_hours: float = Field(default=4.0, description="Max holding hours for altcoins (non-BTC/ETH/SOL) without breakout (+0.5%)")
+    altcoin_time_stop_min_profit_pct: float = Field(default=0.5, description="Minimum profit % required for altcoin to avoid time-stop evacuation at 4h (+0.5%)")
 
     # --- 4 PILARES DE PRECISIÓN CONTRA LA ALEATORIEDAD DEL MERCADO ---
     # 1. Filtro de Ruido Fractal (Hurst Exponent H)
@@ -135,6 +140,15 @@ class BotRiskConfig(BaseModel):
     enable_extended_symbol_quarantine: bool = Field(default=True, description="Quarantine specific symbol after consecutive losses")
     symbol_consecutive_losses_threshold: int = Field(default=2, description="Consecutive losses on single symbol before triggering extended quarantine (2)")
     extended_quarantine_seconds: int = Field(default=14400, description="Duration in seconds of extended quarantine cooldown (4 hours = 14400s)")
+
+    # 4b. Filtro de Calidad de Activo por Win Rate Histórico (Pattern Memory Quality Gate)
+    enable_asset_win_rate_filter: bool = Field(default=True, description="Exclude assets with low rolling win rate (<40%) in PatternMemory")
+    min_asset_win_rate_pct: float = Field(default=40.0, description="Minimum rolling win rate % required for an asset (40%)")
+    min_asset_history_trades: int = Field(default=2, description="Minimum closed trades before asset win rate quality filter activates (2)")
+    asset_win_rate_lookback: int = Field(default=10, description="Number of recent trades per asset to evaluate win rate (10)")
+
+    # Dynamic Sizing por Sharpe
+    enable_sharpe_dynamic_sizing: bool = Field(default=True, description="Scale asset position sizing dynamically by historical Sharpe ratio (up to 2-3x)")
 
     # 5. Spread & Slippage Guard (Microstructure Protection)
     enable_spread_guard: bool = Field(default=True, description="Block or protect entries when bid/ask spread exceeds safe threshold")

@@ -41,3 +41,25 @@ def to_alpaca_symbol(symbol: str) -> str:
     return s
 
 
+MAJOR_CRYPTO_BASES = {"BTC", "ETH", "SOL"}
+
+
+def is_major_crypto(symbol: str) -> bool:
+    """Return True if symbol is a major cryptocurrency (BTC, ETH, SOL)."""
+    if not is_crypto(symbol):
+        return False
+    s = symbol.upper().replace("/", "-").strip()
+    if "-USD" in s:
+        base = s.split("-")[0]
+        return base in MAJOR_CRYPTO_BASES
+    if s.endswith("USD") and len(s) > 3:
+        base = s[:-3]
+        return base in MAJOR_CRYPTO_BASES
+    return s in MAJOR_CRYPTO_BASES
+
+
+def is_altcoin(symbol: str) -> bool:
+    """Return True if symbol is a cryptocurrency other than major tier (BTC/ETH/SOL)."""
+    return is_crypto(symbol) and not is_major_crypto(symbol)
+
+

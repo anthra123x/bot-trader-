@@ -33,7 +33,7 @@ from bot.risk.order_book_analyzer import ORDER_BOOK_ANALYZER, OrderBookAnalyzer
 from bot.risk.quant_screener import QuantScreener, QuantScreenResult
 from bot.risk.risk_engine import RiskEngine
 from bot.scanner.hot_scanner import HOT_MOMENTUM_SCANNER, HotMomentumScanner
-from bot.symbols import is_crypto, normalize_symbol
+from bot.symbols import is_altcoin, is_crypto, normalize_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -817,9 +817,14 @@ class BotRunner:
                 current_sl = max(targets["stop_loss"], p.stop_loss_price or 0.0)
                 target_tp = targets["take_profit"]
             else:
-                default_sl = p.entry_price * (1.0 - (self.config.risk.default_stop_loss_pct / 100.0))
+                sl_pct = (
+                    getattr(self.config.risk, "altcoin_default_stop_loss_pct", 1.5)
+                    if is_altcoin(p.symbol)
+                    else self.config.risk.default_stop_loss_pct
+                )
+                default_sl = p.entry_price * (1.0 - (sl_pct / 100.0))
                 current_sl = p.stop_loss_price or default_sl
-                target_tp = p.entry_price * (1.0 + (self.config.risk.default_stop_loss_pct * self.config.risk.min_risk_reward_ratio / 100.0))
+                target_tp = p.entry_price * (1.0 + (sl_pct * self.config.risk.min_risk_reward_ratio / 100.0))
 
             p.take_profit_price = target_tp
 
@@ -1100,6 +1105,32 @@ class BotRunner:
         if not actionable:
             logger.info(
                 "[PARALLEL_SCREENER] 🛡️ Ningún activo superó el umbral cuantitativo determinista. Capital 100% en resguardo (0 tokens gastados)."
+            )
+            return executed_orders
+
+        # 3b. Asset Quality Filter by Rolling Win Rate (Pattern Memory Quality Gate)
+        if hasattr(self.risk_engine, "pattern_memory") and self.risk_engine.pattern_memory:
+            if getattr(self.config.risk, "enable_asset_win_rate_filter", True):
+                qualified_actionable = []
+                for sym, res in actionable:
+                    rec = self.risk_engine.pattern_memory.get_asset_track_record(
+                        symbol=sym,
+                        lookback=getattr(self.config.risk, "asset_win_rate_lookback", 10),
+                        min_trades=getattr(self.config.risk, "min_asset_history_trades", 2),
+                        min_win_rate_pct=getattr(self.config.risk, "min_asset_win_rate_pct", 40.0),
+                    )
+                    if rec.get("is_disqualified"):
+                        logger.info(
+                            "[ASSET_QUALITY_FILTER] 🛡️ Activo %s descartado del screener por bajo Win Rate histórico: %.1f%% en %d trades (< 40%% requerido). Preservando tokens.",
+                            sym, rec.get("win_rate_pct", 0.0), rec.get("trade_count", 0)
+                        )
+                    else:
+                        qualified_actionable.append((sym, res))
+                actionable = qualified_actionable
+
+        if not actionable:
+            logger.info(
+                "[PARALLEL_SCREENER] 🛡️ Ningún activo calificado tras filtros cuantitativos y de calidad histórica. Capital 100% en resguardo."
             )
             return executed_orders
 
