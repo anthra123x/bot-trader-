@@ -230,6 +230,10 @@ class InstitutionalExecutionGuard:
             OrderState.EXITED: set(),
         }
 
+        if new_state == current:
+            self._order_states[order_id] = new_state
+            return True
+
         if new_state not in valid_transitions.get(current, set()):
             logger.warning(
                 "[ORDER_LIFECYCLE] Invalid state transition for order %s: %s -> %s",

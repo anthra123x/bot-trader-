@@ -556,7 +556,12 @@ class AgentBrain:
                 self._record_audit_in_db(ledger, order=None)
                 return None, ledger
 
-        # 3. Build TradeSignal for RiskEngine
+        # 3. Build TradeSignal for RiskEngine with real decompiled telemetry
+        signal_metrics: dict[str, Any] = {}
+        for obs in ledger.observations:
+            if obs.facet == "quant_metrics" and isinstance(obs.data, dict):
+                signal_metrics.update(obs.data)
+
         signal = TradeSignal(
             symbol=symbol,
             asset_class=asset_class,
@@ -568,6 +573,7 @@ class AgentBrain:
             target_price=ledger.decision.suggested_take_profit,
             stop_loss=ledger.decision.suggested_stop_loss,
             reasoning=ledger.decision.rationale,
+            metrics=signal_metrics,
         )
 
         balance = self.broker.get_account_balance()
