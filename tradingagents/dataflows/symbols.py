@@ -71,7 +71,8 @@ _ALIASES = {
     "US30": "^DJI", "DJI30": "^DJI", "WS30": "^DJI",
     "GER40": "^GDAXI", "GER30": "^GDAXI", "DE40": "^GDAXI",
     "UK100": "^FTSE", "JP225": "^N225", "JPN225": "^N225",
-    "FRA40": "^FCHI", "EU50": "^STOXX50E", "HK50": "^HSI",
+    # Crypto special aliases (Yahoo Finance ticker conventions)
+    "UNI-USD": "UNI7083-USD", "UNI/USD": "UNI7083-USD", "UNIUSD": "UNI7083-USD", "UNI": "UNI7083-USD",
 }
 
 # HKEX codes as Yahoo spells them: the number zero-padded to 4 digits (#957).

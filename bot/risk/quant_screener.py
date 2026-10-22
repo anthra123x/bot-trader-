@@ -125,7 +125,7 @@ class QuantScreener:
         rsi_oversold: float = 42.0,
         rsi_overbought: float = 62.0,
         atr_multiplier_sl: float = 1.2,
-        atr_multiplier_tp: float = 2.4,
+        atr_multiplier_tp: float = 3.0,
         conviction_threshold: float = 55.0,
         enable_mtf_confluence: bool = True,
         mtf_bonus_score: float = 20.0,

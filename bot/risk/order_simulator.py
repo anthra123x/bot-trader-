@@ -45,7 +45,7 @@ class ExecutionSimulator:
         equity_slippage_pct: float = 0.04,     # 0.04% realistic equity slippage
         crypto_taker_fee_pct: float = 0.10,    # 0.10% Alpaca/Binance crypto fee
         equity_fee_per_share: float = 0.005,   # $0.005/share equity commission
-        min_risk_reward_ratio: float = 2.0,    # Strict 2:1 mathematical convexity
+        min_risk_reward_ratio: float = 1.70,   # Net mathematical convexity floor after friction (slippage & fees)
     ):
         self.crypto_slippage_pct = crypto_slippage_pct
         self.equity_slippage_pct = equity_slippage_pct
